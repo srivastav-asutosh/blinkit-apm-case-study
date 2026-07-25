@@ -9,10 +9,17 @@ inventory-days, ~7K replenishment orders), then runs SQL-based root-cause analys
 quantify three operational problems that a network-average KPI hides — and one that only shows up
 when you look across all three domains at once.
 
+**Live dashboard:** [blinkit-apm-case-study.streamlit.app](https://blinkit-apm-case-study.streamlit.app)
+
 **Start here:** [`case_study/Blinkit_Ops_Case_Study.md`](case_study/Blinkit_Ops_Case_Study.md) —
 the full write-up, findings, and how to use this for your application.
 
 ## Quickstart
+
+Just want to explore it? Use the [live dashboard](https://blinkit-apm-case-study.streamlit.app) —
+no setup required (first load takes ~15s while it generates the dataset).
+
+To run it locally instead:
 
 ```bash
 pip install -r requirements.txt
