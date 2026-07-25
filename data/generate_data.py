@@ -14,7 +14,9 @@ Run:
 Outputs CSVs to data/ and loads everything into db/blinkit_ops.db (SQLite).
 """
 
+import os
 import sqlite3
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -371,8 +373,23 @@ print(f"Generated orders: {len(orders):,}")
 
 # ---------------------------------------------------------------------------
 # Persist: CSVs + SQLite
+#
+# Written to temp paths (unique per process) and atomically moved into place
+# at the end. This matters because dashboard/app.py may launch this script
+# from more than one concurrent process on a cold start (e.g. a hosting
+# platform spinning up multiple workers before either sees the DB file
+# exists). Writing in place with if_exists="replace" under that race lets
+# one process's DROP land between another's INSERT statements, silently
+# duplicating dimension-table rows (which then fans out every join against
+# them). Generating to a private temp file/dir first and swapping it in with
+# a single atomic rename means concurrent runs can never interleave -- the
+# last writer simply wins outright, cleanly.
 # ---------------------------------------------------------------------------
+run_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
+
 DATA_DIR.mkdir(exist_ok=True)
+tmp_data_dir = DATA_DIR / f".tmp_{run_id}"
+tmp_data_dir.mkdir()
 for name, df in [
     ("dim_stores", stores),
     ("dim_warehouses", warehouses),
@@ -383,10 +400,14 @@ for name, df in [
     ("fact_replenishment", replenishment),
     ("fact_orders", orders),
 ]:
-    df.to_csv(DATA_DIR / f"{name}.csv", index=False)
+    df.to_csv(tmp_data_dir / f"{name}.csv", index=False)
+for csv_file in tmp_data_dir.iterdir():
+    csv_file.replace(DATA_DIR / csv_file.name)
+tmp_data_dir.rmdir()
 
 DB_PATH.parent.mkdir(exist_ok=True)
-conn = sqlite3.connect(DB_PATH)
+tmp_db_path = DB_PATH.parent / f".tmp_{run_id}.db"
+conn = sqlite3.connect(tmp_db_path)
 stores.to_sql("dim_stores", conn, if_exists="replace", index=False)
 warehouses.to_sql("dim_warehouses", conn, if_exists="replace", index=False)
 skus.to_sql("dim_skus", conn, if_exists="replace", index=False)
@@ -407,6 +428,7 @@ for tbl, cols in [
 
 conn.commit()
 conn.close()
+tmp_db_path.replace(DB_PATH)
 
 print(f"\nSQLite DB written to: {DB_PATH}")
 print("Tables: dim_stores, dim_warehouses, dim_skus, dim_riders, "

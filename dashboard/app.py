@@ -3,8 +3,10 @@ Blinkit Ops Intelligence Dashboard
 Run: streamlit run dashboard/app.py
 """
 
+import os
 import subprocess
 import sys
+import time
 import sqlite3
 from pathlib import Path
 
@@ -16,6 +18,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "blinkit_ops.db"
 GENERATOR = ROOT / "data" / "generate_data.py"
+LOCK_PATH = ROOT / "db" / ".generating.lock"
 
 st.set_page_config(page_title="Blinkit Ops Intelligence", page_icon="📦", layout="wide")
 
@@ -24,15 +27,41 @@ PROBLEM_STORES = {"DEL-E-01", "DEL-E-02", "BLR-S-02", "DEL-S-02"}
 # The generated DB/CSVs are gitignored (they're fully reproducible), so a fresh
 # clone -- e.g. a Streamlit Community Cloud deploy -- won't have them yet.
 # Bootstrap on first boot rather than requiring a manual pre-run step.
+#
+# A hosting platform can spin up more than one worker before any of them see
+# the DB file exist, so an exclusive lock file (atomic create-or-fail) makes
+# only one process actually run the generator; the rest just wait for it to
+# finish. generate_data.py also writes atomically on its own, so even if this
+# lock were somehow lost, concurrent runs still can't corrupt the output --
+# this just avoids wasted duplicate work.
 if not DB_PATH.exists():
-    with st.spinner("First run: generating the simulated 60-day ops dataset (~15s)..."):
-        result = subprocess.run(
-            [sys.executable, str(GENERATOR)], capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            st.error("Data generation failed:")
-            st.code(result.stderr or result.stdout)
-            st.stop()
+    DB_PATH.parent.mkdir(exist_ok=True)
+    try:
+        lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(lock_fd)
+        got_lock = True
+    except FileExistsError:
+        got_lock = False
+
+    if got_lock:
+        with st.spinner("First run: generating the simulated 60-day ops dataset (~15s)..."):
+            result = subprocess.run(
+                [sys.executable, str(GENERATOR)], capture_output=True, text=True
+            )
+            LOCK_PATH.unlink(missing_ok=True)
+            if result.returncode != 0:
+                st.error("Data generation failed:")
+                st.code(result.stderr or result.stdout)
+                st.stop()
+    else:
+        with st.spinner("Another session is generating the dataset, waiting..."):
+            for _ in range(60):
+                if DB_PATH.exists():
+                    break
+                time.sleep(1)
+            else:
+                st.error("Timed out waiting for the dataset to be generated.")
+                st.stop()
 
 
 @st.cache_data
