@@ -3,6 +3,8 @@ Blinkit Ops Intelligence Dashboard
 Run: streamlit run dashboard/app.py
 """
 
+import subprocess
+import sys
 import sqlite3
 from pathlib import Path
 
@@ -13,10 +15,24 @@ import streamlit as st
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "blinkit_ops.db"
+GENERATOR = ROOT / "data" / "generate_data.py"
 
 st.set_page_config(page_title="Blinkit Ops Intelligence", page_icon="📦", layout="wide")
 
 PROBLEM_STORES = {"DEL-E-01", "DEL-E-02", "BLR-S-02", "DEL-S-02"}
+
+# The generated DB/CSVs are gitignored (they're fully reproducible), so a fresh
+# clone -- e.g. a Streamlit Community Cloud deploy -- won't have them yet.
+# Bootstrap on first boot rather than requiring a manual pre-run step.
+if not DB_PATH.exists():
+    with st.spinner("First run: generating the simulated 60-day ops dataset (~15s)..."):
+        result = subprocess.run(
+            [sys.executable, str(GENERATOR)], capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            st.error("Data generation failed:")
+            st.code(result.stderr or result.stdout)
+            st.stop()
 
 
 @st.cache_data
