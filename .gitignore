@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.streamlit/
+.claude/
+
+# Generated data artifacts — reproducible via `python data/generate_data.py`
+db/*.db
+data/*.csv
