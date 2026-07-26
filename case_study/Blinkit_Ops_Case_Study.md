@@ -67,6 +67,25 @@ reviewing them in separate meetings.
   Cross-Domain RCA) with the same findings as the write-ups, interactively explorable. See
   [`dashboard/app.py`](../dashboard/app.py) — run with `streamlit run dashboard/app.py`.
 
+## Beyond the demo: an ingestion layer and four new metrics
+
+The original version was a fixed, read-only snapshot — realistic data, but nowhere to put new
+data in. Two additions turn it into an actual tool rather than a one-time report:
+
+- **A password-gated Admin panel** (`🔐 Admin` tab) with spreadsheet upload (CSV/XLSX, validated
+  against the real schema before commit), manual single-record entry, editable business
+  assumptions, an audit log of every change, and a reset-to-baseline button. See
+  [`dashboard/app.py`](../dashboard/app.py) and the *Admin panel* section of
+  [`README.md`](../README.md).
+- **Four new metrics** beyond the original KPI set — Perfect Order Rate, Inventory Days of Cover,
+  Rider Utilization, and Cost-to-Serve per order — each proposed because it ties two domains
+  together or converts ops performance into a ₹ figure (the kind of number that gets a
+  recommendation funded, not just acknowledged). SQL in
+  [`sql/06_new_metrics.sql`](../sql/06_new_metrics.sql); each query's comments are explicit about
+  which parts are real schema data and which are labeled modeling assumptions (e.g. an assumed
+  6-hour shift length, editable wage rates) — the kind of honesty about proxies vs. ground truth
+  that matters more in a real ops review than in a demo.
+
 ## Using this for your application
 
 - **Resume bullet (pick one):**
@@ -77,6 +96,9 @@ reviewing them in separate meetings.
   - *"Designed and queried a relational dataset spanning supply chain, store ops, and last-mile
     delivery; built a composite cross-domain risk score that surfaced 2 stores compounding
     problems across all three domains, invisible in any single-domain KPI view."*
+  - *"Extended a read-only analytics dashboard into an admin-managed tool — schema-validated
+    spreadsheet ingestion, audit logging, and configurable business assumptions — and proposed 4
+    additional KPIs (incl. a labor-cost-to-serve metric) grounded in the existing data model."*
 - **In an interview**, walk the funnel: network KPI → segmentation → isolation → root cause →
   quantified recommendation. That's the structure every finding in this project follows, and it's
   the structure the JD is explicitly asking for ("Analyze data, perform RCA, and identify

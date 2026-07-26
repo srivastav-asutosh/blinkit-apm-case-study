@@ -372,6 +372,25 @@ orders = pd.DataFrame(order_rows)
 print(f"Generated orders: {len(orders):,}")
 
 # ---------------------------------------------------------------------------
+# Business assumptions (single-row config table)
+# Editable later from the dashboard's Admin panel -- these are the wage
+# inputs the Cost-to-Serve metric is computed from. Defaults are rough
+# industry-plausible Indian quick-commerce hourly wages, clearly labeled as
+# assumptions rather than sourced figures.
+# ---------------------------------------------------------------------------
+business_assumptions = pd.DataFrame(
+    [
+        {
+            "id": 1,
+            "picker_hourly_wage_inr": 120.0,
+            "rider_hourly_wage_inr": 100.0,
+            "updated_by": "system_default",
+            "updated_at": pd.Timestamp.utcnow().tz_localize(None),
+        }
+    ]
+)
+
+# ---------------------------------------------------------------------------
 # Persist: CSVs + SQLite
 #
 # Written to temp paths (unique per process) and atomically moved into place
@@ -399,6 +418,7 @@ for name, df in [
     ("fact_inventory_daily", inventory),
     ("fact_replenishment", replenishment),
     ("fact_orders", orders),
+    ("business_assumptions", business_assumptions),
 ]:
     df.to_csv(tmp_data_dir / f"{name}.csv", index=False)
 for csv_file in tmp_data_dir.iterdir():
@@ -416,6 +436,23 @@ staffing.to_sql("fact_staffing_daily", conn, if_exists="replace", index=False)
 inventory.to_sql("fact_inventory_daily", conn, if_exists="replace", index=False)
 replenishment.to_sql("fact_replenishment", conn, if_exists="replace", index=False)
 orders.to_sql("fact_orders", conn, if_exists="replace", index=False)
+business_assumptions.to_sql("business_assumptions", conn, if_exists="replace", index=False)
+
+# Admin-panel ingestion audit log -- created empty here (schema only); the
+# dashboard's Admin tab appends one row per upload/manual entry/reset so
+# there's a visible history of who changed what and when.
+conn.execute(
+    """
+    CREATE TABLE IF NOT EXISTS upload_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_time TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_table TEXT,
+        rows_affected INTEGER,
+        note TEXT
+    )
+    """
+)
 
 for tbl, cols in [
     ("fact_inventory_daily", ["store_id", "sku_id", "date"]),
@@ -432,4 +469,5 @@ tmp_db_path.replace(DB_PATH)
 
 print(f"\nSQLite DB written to: {DB_PATH}")
 print("Tables: dim_stores, dim_warehouses, dim_skus, dim_riders, "
-      "fact_staffing_daily, fact_inventory_daily, fact_replenishment, fact_orders")
+      "fact_staffing_daily, fact_inventory_daily, fact_replenishment, fact_orders, "
+      "business_assumptions, upload_log")

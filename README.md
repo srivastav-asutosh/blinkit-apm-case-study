@@ -27,6 +27,16 @@ python data/generate_data.py       # generates data/*.csv and db/blinkit_ops.db
 streamlit run dashboard/app.py     # interactive dashboard at localhost:8501
 ```
 
+To use the Admin panel (spreadsheet upload, manual entry, business assumptions), set an admin
+password before launching — locally via `.streamlit/secrets.toml`:
+
+```toml
+admin_password = "choose-something"
+```
+
+On Streamlit Community Cloud: App settings → Secrets, same key. Without it configured, the Admin
+tab shows setup instructions instead of a login form.
+
 ## Structure
 
 ```
@@ -34,16 +44,36 @@ data/generate_data.py        Synthetic data generator (reorder-point inventory s
                               order-funnel time simulation). Root causes are structural, not
                               hard-coded onto rows.
 db/blinkit_ops.db             SQLite database (generated)
-sql/01_schema.sql             Table definitions
+sql/01_schema.sql             Table definitions (incl. business_assumptions, upload_log)
 sql/02_supply_chain_kpis.sql  Fill rate, stockout rate, lead-time RCA
 sql/03_store_ops_kpis.sql     SLA adherence, staffing-ratio RCA
 sql/04_last_mile_kpis.sql     Delivery time, zone/rain/rider-load RCA
 sql/05_cross_domain_rca.sql   Composite store-level risk score across all 3 domains
-dashboard/app.py              Streamlit + Plotly dashboard (5 tabs)
+sql/06_new_metrics.sql        Perfect Order Rate, Days of Cover, Rider Utilization, Cost-to-Serve
+dashboard/app.py              Streamlit + Plotly dashboard (7 tabs, incl. Admin)
 analysis/*.md                 Per-domain RCA write-ups (problem → investigation → root cause →
                                recommendation → projected impact)
 case_study/Blinkit_Ops_Case_Study.md   Top-level summary + resume/interview guidance
 ```
+
+## Admin panel
+
+A password-gated tab (`🔐 Admin`) that turns this from a read-only demo into an actual
+data-ingestion tool:
+
+- **Spreadsheet upload** — CSV/XLSX per table, validated against the real schema (missing columns,
+  bad booleans, non-numeric values all rejected with specific errors) before commit, append or
+  replace mode
+- **Manual entry** — log a single staffing shift without a file
+- **Business assumptions** — editable picker/rider hourly wage inputs, feeding the Cost-to-Serve metric
+- **Audit log** — every upload/edit/reset recorded with timestamp and row count
+- **Reset to baseline** — regenerates the original demo dataset on demand
+
+**Persistence caveat:** Streamlit Community Cloud's free tier has no persistent disk. Uploads
+survive as long as the app instance keeps running, but a reboot or redeploy resets to the
+generated baseline. Real cross-restart persistence needs an external database (e.g. a free-tier
+Postgres/Turso) wired in via `st.secrets` — not set up here since it requires creating an account
+on that service.
 
 ## Dataset design
 
