@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import time
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,10 +16,35 @@ import plotly.graph_objects as go
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from db_store import get_store  # noqa: E402
+
 DB_PATH = ROOT / "db" / "blinkit_ops.db"
 GENERATOR = ROOT / "data" / "generate_data.py"
 LOCK_PATH = ROOT / "db" / ".generating.lock"
 NEW_METRICS_SQL = ROOT / "sql" / "06_new_metrics.sql"
+
+
+def get_secret(key):
+    try:
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
+
+TURSO_URL = get_secret("turso_url")
+TURSO_AUTH_TOKEN = get_secret("turso_auth_token")
+USING_TURSO = bool(TURSO_URL and TURSO_AUTH_TOKEN)
+store = get_store(url=TURSO_URL, token=TURSO_AUTH_TOKEN, sqlite_path=DB_PATH)
+
+
+def subprocess_env():
+    """Env for the generate_data.py subprocess, relaying Turso creds if configured."""
+    env = os.environ.copy()
+    if USING_TURSO:
+        env["TURSO_URL"] = TURSO_URL
+        env["TURSO_AUTH_TOKEN"] = TURSO_AUTH_TOKEN
+    return env
 
 SIZE_PICKERS_NEEDED = {"Small": 4, "Medium": 6, "Large": 9}
 SIZE_RIDERS = {"Small": 6, "Medium": 9, "Large": 13}
@@ -75,18 +99,21 @@ st.set_page_config(page_title="Blinkit Ops Intelligence", page_icon="📦", layo
 
 PROBLEM_STORES = {"DEL-E-01", "DEL-E-02", "BLR-S-02", "DEL-S-02"}
 
-# The generated DB/CSVs are gitignored (they're fully reproducible), so a fresh
-# clone -- e.g. a Streamlit Community Cloud deploy -- won't have them yet.
-# Bootstrap on first boot rather than requiring a manual pre-run step.
+# The generated dataset is gitignored (it's fully reproducible), so a fresh
+# clone -- e.g. a Streamlit Community Cloud deploy, or a fresh Turso database
+# with no tables yet -- won't have it. Bootstrap on first boot rather than
+# requiring a manual pre-run step. `row_count` returns 0 for both backends
+# if the table doesn't exist yet, so this check works identically either way.
 #
 # A hosting platform can spin up more than one worker before any of them see
-# the DB file exist, so an exclusive lock file (atomic create-or-fail) makes
-# only one process actually run the generator; the rest just wait for it to
-# finish. generate_data.py also writes atomically on its own, so even if this
-# lock were somehow lost, concurrent runs still can't corrupt the output --
-# this just avoids wasted duplicate work.
-if not DB_PATH.exists():
-    DB_PATH.parent.mkdir(exist_ok=True)
+# data exist, so an exclusive lock file (atomic create-or-fail) makes only
+# one process actually run the generator; the rest just wait for it to
+# finish. generate_data.py also writes atomically on its own (SQLite path)
+# or table-by-table with FK checks off (Turso path), so even if this lock
+# were somehow lost, concurrent runs still can't corrupt the output -- this
+# just avoids wasted duplicate work.
+DB_PATH.parent.mkdir(exist_ok=True)
+if store.row_count("dim_stores") == 0:
     try:
         lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.close(lock_fd)
@@ -95,9 +122,15 @@ if not DB_PATH.exists():
         got_lock = False
 
     if got_lock:
-        with st.spinner("First run: generating the simulated 60-day ops dataset (~15s)..."):
+        spinner_msg = (
+            "First run: generating the simulated 60-day ops dataset and loading it into "
+            "Turso (~60-90s, one-time)..." if USING_TURSO else
+            "First run: generating the simulated 60-day ops dataset (~15s)..."
+        )
+        with st.spinner(spinner_msg):
             result = subprocess.run(
-                [sys.executable, str(GENERATOR)], capture_output=True, text=True
+                [sys.executable, str(GENERATOR)], capture_output=True, text=True,
+                env=subprocess_env(),
             )
             LOCK_PATH.unlink(missing_ok=True)
             if result.returncode != 0:
@@ -106,8 +139,8 @@ if not DB_PATH.exists():
                 st.stop()
     else:
         with st.spinner("Another session is generating the dataset, waiting..."):
-            for _ in range(60):
-                if DB_PATH.exists():
+            for _ in range(120):
+                if store.row_count("dim_stores") > 0:
                     break
                 time.sleep(1)
             else:
@@ -117,23 +150,17 @@ if not DB_PATH.exists():
 
 @st.cache_data
 def load_data():
-    conn = sqlite3.connect(DB_PATH)
-    stores = pd.read_sql("SELECT * FROM dim_stores", conn)
-    warehouses = pd.read_sql("SELECT * FROM dim_warehouses", conn)
-    skus = pd.read_sql("SELECT * FROM dim_skus", conn)
-    inventory = pd.read_sql(
-        "SELECT * FROM fact_inventory_daily", conn, parse_dates=["date"]
+    stores = store.read_sql("SELECT * FROM dim_stores")
+    warehouses = store.read_sql("SELECT * FROM dim_warehouses")
+    skus = store.read_sql("SELECT * FROM dim_skus")
+    inventory = store.read_sql("SELECT * FROM fact_inventory_daily", parse_dates=["date"])
+    replenishment = store.read_sql(
+        "SELECT * FROM fact_replenishment", parse_dates=["order_date", "received_date"]
     )
-    replenishment = pd.read_sql(
-        "SELECT * FROM fact_replenishment", conn, parse_dates=["order_date", "received_date"]
-    )
-    staffing = pd.read_sql("SELECT * FROM fact_staffing_daily", conn, parse_dates=["date"])
-    orders = pd.read_sql(
-        "SELECT * FROM fact_orders", conn, parse_dates=["date", "order_time"]
-    )
-    assumptions = pd.read_sql("SELECT * FROM business_assumptions WHERE id = 1", conn)
-    upload_log = pd.read_sql("SELECT * FROM upload_log ORDER BY id DESC LIMIT 25", conn)
-    conn.close()
+    staffing = store.read_sql("SELECT * FROM fact_staffing_daily", parse_dates=["date"])
+    orders = store.read_sql("SELECT * FROM fact_orders", parse_dates=["date", "order_time"])
+    assumptions = store.read_sql("SELECT * FROM business_assumptions WHERE id = 1")
+    upload_log = store.read_sql("SELECT * FROM upload_log ORDER BY id DESC LIMIT 25")
 
     inventory = inventory.merge(stores, on="store_id").merge(
         skus[["sku_id", "category", "is_fast_moving", "unit_cost"]], on="sku_id"
@@ -152,20 +179,14 @@ def load_new_metrics():
         "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).split(";")
         if s.strip()
     ]
-    conn = sqlite3.connect(DB_PATH)
-    dfs = [pd.read_sql(stmt, conn) for stmt in stmts]
-    conn.close()
-    return dfs  # [perfect_order, days_of_cover, rider_utilization, cost_to_serve]
+    return [store.read_sql(stmt) for stmt in stmts]  # [perfect_order, days_of_cover, rider_utilization, cost_to_serve]
 
 
 def log_admin_action(action, target_table=None, rows_affected=None, note=None):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
+    store.execute(
         "INSERT INTO upload_log (event_time, action, target_table, rows_affected, note) VALUES (?, ?, ?, ?, ?)",
-        (datetime.now(timezone.utc).isoformat(timespec="seconds"), action, target_table, rows_affected, note),
+        [datetime.now(timezone.utc).isoformat(timespec="seconds"), action, target_table, rows_affected, note],
     )
-    conn.commit()
-    conn.close()
 
 
 def refresh_after_write():
@@ -600,10 +621,7 @@ with tab_metrics:
 # Admin tab
 # ---------------------------------------------------------------------------
 with tab_admin:
-    try:
-        configured_password = st.secrets.get("admin_password")
-    except Exception:
-        configured_password = None
+    configured_password = get_secret("admin_password")
 
     if not configured_password:
         st.warning(
@@ -633,11 +651,14 @@ with tab_admin:
                     st.session_state.admin_authed = False
                     st.rerun()
 
-            st.caption(
-                "Note: on Streamlit Community Cloud's free tier, uploads persist for as long as this "
-                "app instance keeps running — a reboot or redeploy resets to the generated baseline "
-                "unless external persistent storage is wired in."
-            )
+            if USING_TURSO:
+                st.caption("Connected to Turso — uploads and edits persist permanently, including across reboots and redeploys.")
+            else:
+                st.caption(
+                    "Note: no external database configured, so this is running on local SQLite — "
+                    "uploads persist for as long as this app instance keeps running, but a reboot or "
+                    "redeploy resets to the generated baseline."
+                )
 
             # --- Business assumptions ---
             st.markdown("#### Business assumptions")
@@ -650,14 +671,11 @@ with tab_admin:
                     "Rider hourly wage (₹)", min_value=0.0, value=float(wage["rider_hourly_wage_inr"]), step=5.0
                 )
                 if st.form_submit_button("Save assumptions"):
-                    conn = sqlite3.connect(DB_PATH)
-                    conn.execute(
+                    store.execute(
                         "UPDATE business_assumptions SET picker_hourly_wage_inr=?, rider_hourly_wage_inr=?, "
                         "updated_by=?, updated_at=? WHERE id=1",
-                        (picker_wage, rider_wage, "admin_panel", datetime.now(timezone.utc).isoformat(timespec="seconds")),
+                        [picker_wage, rider_wage, "admin_panel", datetime.now(timezone.utc).isoformat(timespec="seconds")],
                     )
-                    conn.commit()
-                    conn.close()
                     log_admin_action("update_assumptions", "business_assumptions", 1,
                                       f"picker=₹{picker_wage}/hr, rider=₹{rider_wage}/hr")
                     refresh_after_write()
@@ -703,10 +721,7 @@ with tab_admin:
                             )
                             confirm_ok = confirm_text.strip() == "REPLACE"
                         if st.button("Commit to database", disabled=not confirm_ok, key=f"commit_{target_table}"):
-                            conn = sqlite3.connect(DB_PATH)
-                            clean_df.to_sql(target_table, conn, if_exists=mode, index=False)
-                            conn.commit()
-                            conn.close()
+                            store.write_df(target_table, clean_df, mode=mode)
                             log_admin_action(f"upload_{mode}", target_table, len(clean_df), uploaded.name)
                             refresh_after_write()
                             st.success(f"Committed {len(clean_df):,} row(s) to {target_table}.")
@@ -728,15 +743,12 @@ with tab_admin:
                 m_riders = sc5.number_input("Riders on shift", min_value=0, value=SIZE_RIDERS[size_tier] // 2, step=1)
                 if st.form_submit_button("Log shift"):
                     ratio = round(m_present / needed, 2) if needed else 0
-                    conn = sqlite3.connect(DB_PATH)
-                    conn.execute(
+                    store.execute(
                         "INSERT OR REPLACE INTO fact_staffing_daily "
                         "(date, store_id, shift, pickers_needed, pickers_present, riders_on_shift, picker_staffing_ratio) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (m_date.isoformat(), m_store, m_shift, needed, m_present, m_riders, ratio),
+                        [m_date.isoformat(), m_store, m_shift, needed, m_present, m_riders, ratio],
                     )
-                    conn.commit()
-                    conn.close()
                     log_admin_action("manual_entry", "fact_staffing_daily", 1,
                                       f"{m_store} {m_date} {m_shift}")
                     refresh_after_write()
@@ -750,8 +762,12 @@ with tab_admin:
             st.caption("Regenerates the original simulated dataset, discarding any uploads or manual entries.")
             reset_confirm = st.text_input("Type RESET to confirm", key="reset_confirm")
             if st.button("Reset to baseline", disabled=reset_confirm.strip() != "RESET"):
-                with st.spinner("Regenerating baseline dataset..."):
-                    result = subprocess.run([sys.executable, str(GENERATOR)], capture_output=True, text=True)
+                reset_msg = "Regenerating baseline dataset in Turso (~60-90s)..." if USING_TURSO else "Regenerating baseline dataset..."
+                with st.spinner(reset_msg):
+                    result = subprocess.run(
+                        [sys.executable, str(GENERATOR)], capture_output=True, text=True,
+                        env=subprocess_env(),
+                    )
                 if result.returncode != 0:
                     st.error("Reset failed:")
                     st.code(result.stderr or result.stdout)

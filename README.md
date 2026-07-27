@@ -42,8 +42,10 @@ tab shows setup instructions instead of a login form.
 ```
 data/generate_data.py        Synthetic data generator (reorder-point inventory simulation +
                               order-funnel time simulation). Root causes are structural, not
-                              hard-coded onto rows.
-db/blinkit_ops.db             SQLite database (generated)
+                              hard-coded onto rows. Writes to Turso if configured, else local SQLite.
+db_store.py                   Data-access layer: uniform read_sql/execute/write_df interface over
+                              either backend -- see "Persistent storage" below.
+db/blinkit_ops.db             Local SQLite database (generated, used when Turso isn't configured)
 sql/01_schema.sql             Table definitions (incl. business_assumptions, upload_log)
 sql/02_supply_chain_kpis.sql  Fill rate, stockout rate, lead-time RCA
 sql/03_store_ops_kpis.sql     SLA adherence, staffing-ratio RCA
@@ -69,11 +71,42 @@ data-ingestion tool:
 - **Audit log** — every upload/edit/reset recorded with timestamp and row count
 - **Reset to baseline** — regenerates the original demo dataset on demand
 
-**Persistence caveat:** Streamlit Community Cloud's free tier has no persistent disk. Uploads
-survive as long as the app instance keeps running, but a reboot or redeploy resets to the
-generated baseline. Real cross-restart persistence needs an external database (e.g. a free-tier
-Postgres/Turso) wired in via `st.secrets` — not set up here since it requires creating an account
-on that service.
+**Persistence:** with no external database configured, this runs on local SQLite — uploads survive
+as long as the app instance keeps running, but a reboot or redeploy on Streamlit Community Cloud's
+free tier (no persistent disk) resets to the generated baseline. With Turso configured (see below),
+every upload/edit persists permanently, including across reboots and redeploys.
+
+## Persistent storage (optional): Turso
+
+By default this runs on local SQLite, which is why the caveat above exists. To make Admin-panel
+changes actually permanent, connect it to a free [Turso](https://turso.tech) database instead —
+no code changes needed, just two secrets:
+
+1. Create a free account at [turso.tech](https://turso.tech) and a database:
+   ```bash
+   turso db create blinkit-ops
+   turso db show blinkit-ops --url
+   turso db tokens create blinkit-ops
+   ```
+2. Add both values to secrets — locally in `.streamlit/secrets.toml`, and on Streamlit Cloud under
+   App settings → Secrets:
+   ```toml
+   turso_url = "libsql://blinkit-ops-yourname.turso.io"
+   turso_auth_token = "..."
+   ```
+3. That's it. On next boot, [`data/generate_data.py`](data/generate_data.py) and
+   [`dashboard/app.py`](dashboard/app.py) both detect the secrets automatically and target Turso
+   instead of local SQLite — the entire app, including the Admin panel's uploads, edits, and
+   audit log, now persists permanently.
+
+**Why HTTP instead of Turso's native Python client:** `libsql-experimental` (the native client's
+underlying binding) ships no prebuilt wheels for any platform — installing it means compiling a
+Rust extension locally, which needs a full Rust+MSVC toolchain and isn't guaranteed to succeed in
+Streamlit Cloud's build step either. [`db_store.py`](db_store.py) instead talks to Turso's HTTP
+"pipeline" API (Hrana-over-HTTP) directly via `requests`, which has zero compiled dependencies and
+behaves identically on every platform. Bulk loads batch up to 1,000 rows per SQL statement (~20,000
+placeholders, empirically verified safe) and up to 5 statements per HTTP round trip, so the initial
+~155K-row load takes roughly a minute rather than hundreds of individual round trips.
 
 ## Dataset design
 

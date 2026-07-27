@@ -11,11 +11,14 @@ real ops investigation.
 Run:
     python data/generate_data.py
 
-Outputs CSVs to data/ and loads everything into db/blinkit_ops.db (SQLite).
+Outputs CSVs to data/. Loads into a Turso (libSQL) database if TURSO_URL and
+TURSO_AUTH_TOKEN are set in the environment; otherwise into a local SQLite
+file at db/blinkit_ops.db.
 """
 
 import os
 import sqlite3
+import sys
 import uuid
 from pathlib import Path
 
@@ -27,6 +30,14 @@ RNG = np.random.default_rng(42)
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 DB_PATH = ROOT / "db" / "blinkit_ops.db"
+SCHEMA_SQL_PATH = ROOT / "sql" / "01_schema.sql"
+
+sys.path.insert(0, str(ROOT))
+from db_store import get_store  # noqa: E402
+
+TURSO_URL = os.environ.get("TURSO_URL")
+TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
+USING_TURSO = bool(TURSO_URL and TURSO_AUTH_TOKEN)
 
 START_DATE = pd.Timestamp("2026-05-27")
 END_DATE = pd.Timestamp("2026-07-25")
@@ -391,27 +402,20 @@ business_assumptions = pd.DataFrame(
 )
 
 # ---------------------------------------------------------------------------
-# Persist: CSVs + SQLite
-#
-# Written to temp paths (unique per process) and atomically moved into place
-# at the end. This matters because dashboard/app.py may launch this script
-# from more than one concurrent process on a cold start (e.g. a hosting
-# platform spinning up multiple workers before either sees the DB file
-# exists). Writing in place with if_exists="replace" under that race lets
-# one process's DROP land between another's INSERT statements, silently
-# duplicating dimension-table rows (which then fans out every join against
-# them). Generating to a private temp file/dir first and swapping it in with
-# a single atomic rename means concurrent runs can never interleave -- the
-# last writer simply wins outright, cleanly.
+# Persist: CSVs always written locally; the database goes to Turso if
+# TURSO_URL/TURSO_AUTH_TOKEN are set, otherwise to a local SQLite file.
 # ---------------------------------------------------------------------------
-run_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
-
 DATA_DIR.mkdir(exist_ok=True)
+run_id = f"{os.getpid()}_{uuid.uuid4().hex[:8]}"
 tmp_data_dir = DATA_DIR / f".tmp_{run_id}"
 tmp_data_dir.mkdir()
-for name, df in [
-    ("dim_stores", stores),
+# Parents before children -- dim_stores.warehouse_id references
+# dim_warehouses, and the fact tables reference stores/skus/warehouses.
+# Local SQLite never enforced this (foreign_keys is off by default there),
+# but Turso does enforce it, so the write order has to be correct for both.
+TABLES = [
     ("dim_warehouses", warehouses),
+    ("dim_stores", stores),
     ("dim_skus", skus),
     ("dim_riders", riders),
     ("fact_staffing_daily", staffing),
@@ -419,55 +423,86 @@ for name, df in [
     ("fact_replenishment", replenishment),
     ("fact_orders", orders),
     ("business_assumptions", business_assumptions),
-]:
+]
+for name, df in TABLES:
     df.to_csv(tmp_data_dir / f"{name}.csv", index=False)
 for csv_file in tmp_data_dir.iterdir():
     csv_file.replace(DATA_DIR / csv_file.name)
 tmp_data_dir.rmdir()
 
-DB_PATH.parent.mkdir(exist_ok=True)
-tmp_db_path = DB_PATH.parent / f".tmp_{run_id}.db"
-conn = sqlite3.connect(tmp_db_path)
-stores.to_sql("dim_stores", conn, if_exists="replace", index=False)
-warehouses.to_sql("dim_warehouses", conn, if_exists="replace", index=False)
-skus.to_sql("dim_skus", conn, if_exists="replace", index=False)
-riders.to_sql("dim_riders", conn, if_exists="replace", index=False)
-staffing.to_sql("fact_staffing_daily", conn, if_exists="replace", index=False)
-inventory.to_sql("fact_inventory_daily", conn, if_exists="replace", index=False)
-replenishment.to_sql("fact_replenishment", conn, if_exists="replace", index=False)
-orders.to_sql("fact_orders", conn, if_exists="replace", index=False)
-business_assumptions.to_sql("business_assumptions", conn, if_exists="replace", index=False)
-
-# Admin-panel ingestion audit log -- created empty here (schema only); the
-# dashboard's Admin tab appends one row per upload/manual entry/reset so
-# there's a visible history of who changed what and when.
-conn.execute(
-    """
-    CREATE TABLE IF NOT EXISTS upload_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_time TEXT NOT NULL,
-        action TEXT NOT NULL,
-        target_table TEXT,
-        rows_affected INTEGER,
-        note TEXT
-    )
-    """
-)
-
-for tbl, cols in [
+INDEXES = [
     ("fact_inventory_daily", ["store_id", "sku_id", "date"]),
     ("fact_orders", ["store_id", "date", "hour"]),
     ("fact_replenishment", ["store_id", "warehouse_id"]),
     ("fact_staffing_daily", ["store_id", "date", "shift"]),
-]:
-    idx_name = f"idx_{tbl}_{'_'.join(cols)}"
-    conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl} ({', '.join(cols)})")
+]
 
-conn.commit()
-conn.close()
-tmp_db_path.replace(DB_PATH)
+if USING_TURSO:
+    print(f"\nWriting to Turso: {TURSO_URL}")
+    store = get_store(url=TURSO_URL, token=TURSO_AUTH_TOKEN)
+    # Turso enforces FK constraints by default; local SQLite never has
+    # (foreign_keys is off there unless a PRAGMA turns it on). Matching that
+    # existing, already-relied-on behavior rather than fighting it -- the
+    # write order above is still correct regardless, this is belt and braces.
+    store.execute("PRAGMA foreign_keys = OFF")
 
-print(f"\nSQLite DB written to: {DB_PATH}")
+    schema_sql = SCHEMA_SQL_PATH.read_text(encoding="utf-8")
+    schema_statements = [
+        s.strip() for s in
+        "\n".join(l for l in schema_sql.splitlines() if not l.strip().startswith("--")).split(";")
+        if s.strip()
+    ]
+    store.execute_script(schema_statements)
+
+    for name, df in TABLES:
+        print(f"  {name}: {len(df):,} rows...")
+        store.write_df(name, df, mode="replace")
+    store.execute("DELETE FROM upload_log")
+
+    print(f"\nTurso database updated: {TURSO_URL}")
+else:
+    # Written to a temp file (unique per process) and atomically moved into
+    # place at the end. This matters because dashboard/app.py may launch
+    # this script from more than one concurrent process on a cold start
+    # (e.g. a hosting platform spinning up multiple workers before either
+    # sees the DB file exists). Writing in place with if_exists="replace"
+    # under that race lets one process's DROP land between another's
+    # INSERT statements, silently duplicating dimension-table rows (which
+    # then fans out every join against them). A private temp file swapped
+    # in with a single atomic rename means concurrent runs can never
+    # interleave -- the last writer simply wins outright, cleanly.
+    DB_PATH.parent.mkdir(exist_ok=True)
+    tmp_db_path = DB_PATH.parent / f".tmp_{run_id}.db"
+    conn = sqlite3.connect(tmp_db_path)
+    for name, df in TABLES:
+        df.to_sql(name, conn, if_exists="replace", index=False)
+
+    # Admin-panel ingestion audit log -- created empty here (schema only);
+    # the dashboard's Admin tab appends one row per upload/manual
+    # entry/reset so there's a visible history of who changed what and when.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS upload_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_time TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_table TEXT,
+            rows_affected INTEGER,
+            note TEXT
+        )
+        """
+    )
+
+    for tbl, cols in INDEXES:
+        idx_name = f"idx_{tbl}_{'_'.join(cols)}"
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl} ({', '.join(cols)})")
+
+    conn.commit()
+    conn.close()
+    tmp_db_path.replace(DB_PATH)
+
+    print(f"\nSQLite DB written to: {DB_PATH}")
+
 print("Tables: dim_stores, dim_warehouses, dim_skus, dim_riders, "
       "fact_staffing_daily, fact_inventory_daily, fact_replenishment, fact_orders, "
       "business_assumptions, upload_log")
