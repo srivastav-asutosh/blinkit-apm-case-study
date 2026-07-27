@@ -113,7 +113,23 @@ PROBLEM_STORES = {"DEL-E-01", "DEL-E-02", "BLR-S-02", "DEL-S-02"}
 # were somehow lost, concurrent runs still can't corrupt the output -- this
 # just avoids wasted duplicate work.
 DB_PATH.parent.mkdir(exist_ok=True)
-if store.row_count("dim_stores") == 0:
+
+try:
+    _needs_bootstrap = store.row_count("dim_stores") == 0
+except Exception as e:
+    # Streamlit Cloud redacts exception text on unhandled crashes regardless
+    # of what it says, so an error here has to be written to the page via
+    # st.error/st.code (rendered as normal content) rather than left to
+    # propagate and hit that redaction.
+    st.error(
+        "Couldn't reach the configured database. If you just added Turso "
+        "secrets, double-check `turso_url` and `turso_auth_token` in "
+        "Settings → Secrets for typos or stray whitespace."
+    )
+    st.code(f"{type(e).__name__}: {e}")
+    st.stop()
+
+if _needs_bootstrap:
     try:
         lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.close(lock_fd)

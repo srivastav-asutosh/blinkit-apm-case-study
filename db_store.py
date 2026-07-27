@@ -124,7 +124,16 @@ class TursoStore:
     def _pipeline(self, stmt_requests):
         body = {"requests": stmt_requests + [{"type": "close"}]}
         resp = requests.post(self.endpoint, json=body, headers=self.headers, timeout=90)
-        resp.raise_for_status()
+        if not resp.ok:
+            # Streamlit Cloud redacts exception messages on its public error
+            # page, so a bare raise_for_status() shows nothing diagnosable.
+            # Surface the status/reason/body here (never the token) so a
+            # misconfigured secret is debuggable without needing dashboard
+            # log access.
+            raise RuntimeError(
+                f"Turso HTTP {resp.status_code} {resp.reason} calling {self.endpoint.split('://', 1)[-1].split('/')[0]} "
+                f"-- response: {resp.text[:300]}"
+            )
         data = resp.json()
         out = []
         for r in data["results"][: len(stmt_requests)]:
