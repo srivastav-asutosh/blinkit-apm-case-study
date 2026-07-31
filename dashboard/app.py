@@ -23,6 +23,7 @@ DB_PATH = ROOT / "db" / "blinkit_ops.db"
 GENERATOR = ROOT / "data" / "generate_data.py"
 LOCK_PATH = ROOT / "db" / ".generating.lock"
 NEW_METRICS_SQL = ROOT / "sql" / "06_new_metrics.sql"
+SAFETY_STOCK_SQL = ROOT / "sql" / "07_safety_stock_policy.sql"
 
 
 def get_secret(key):
@@ -74,7 +75,7 @@ UPLOADABLE_TABLES = {
     },
     "fact_inventory_daily": {
         "columns": ["date", "store_id", "sku_id", "opening_stock", "demand",
-                    "units_sold", "closing_stock", "stockout_flag", "lost_units"],
+                    "units_sold", "closing_stock", "stockout_flag", "lost_units", "wasted_units"],
         "default_mode": "append",
         "bool_cols": ["stockout_flag"],
     },
@@ -196,6 +197,13 @@ def load_new_metrics():
         if s.strip()
     ]
     return [store.read_sql(stmt) for stmt in stmts]  # [perfect_order, days_of_cover, rider_utilization, cost_to_serve]
+
+
+@st.cache_data
+def load_safety_stock_policy():
+    sql = SAFETY_STOCK_SQL.read_text(encoding="utf-8")
+    stmt = "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).strip().rstrip(";")
+    return store.read_sql(stmt)
 
 
 def log_admin_action(action, target_table=None, rows_affected=None, note=None):
@@ -411,6 +419,102 @@ with tab_supply:
     fig = px.bar(cat_view, x="category", y="stockout_rate_pct",
                  title="Stockout rate by category — WH-DEL-SECONDARY stores")
     st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Safety stock policy review")
+    st.caption(
+        "The network's current reorder-point formula is a flat \"+2 days\" buffer, regardless of "
+        "how volatile a SKU's demand is or how variable its warehouse's lead time is. This isn't "
+        "the root cause found above -- it's a second, independent finding: the *policy itself* "
+        "doesn't scale with variability. SQL: sql/07_safety_stock_policy.sql."
+    )
+    ss = load_safety_stock_policy()
+    ss_view = ss.copy()
+    ss_view["direction"] = ss_view["gap_pct"].apply(lambda v: "Under-buffered" if v > 0 else "Over-buffered")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(
+            ss_view, x="warehouse_id", y="lead_time_stddev_days",
+            title="Lead-time variability (std dev, days) by warehouse",
+            labels={"lead_time_stddev_days": "Lead-time std dev (days)", "warehouse_id": "Warehouse"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig = px.bar(
+            ss_view.sort_values("gap_pct"), x="warehouse_id", y="gap_pct", color="direction",
+            color_discrete_map={"Under-buffered": "#d03b3b", "Over-buffered": "#1c5cab"},
+            title="Correct vs. current reorder point: gap %",
+            labels={"gap_pct": "Gap (correct vs. current, %)", "warehouse_id": "Warehouse"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(
+        ss_view[["warehouse_id", "avg_lead_time_days", "lead_time_stddev_days",
+                 "avg_correct_rop_units", "avg_current_rop_units", "gap_pct", "gap_value_inr", "direction"]]
+        .rename(columns={
+            "avg_lead_time_days": "Avg lead time (days)", "lead_time_stddev_days": "Lead-time std dev (days)",
+            "avg_correct_rop_units": "Correct ROP (units)", "avg_current_rop_units": "Current ROP (units)",
+            "gap_pct": "Gap (%)", "gap_value_inr": "Gap value (₹)", "direction": "Direction",
+        }),
+        use_container_width=True, hide_index=True,
+    )
+    net_gap = ss["gap_value_inr"].sum()
+    st.markdown(
+        f"**Net effect:** the network could shift its total safety-stock investment by "
+        f"**₹{abs(net_gap):,.0f}** ({'net reduction' if net_gap < 0 else 'net increase'}) while "
+        f"*improving* service at the highest-variability warehouse — this is a reallocation finding, "
+        f"not a spend-more finding. The current policy over-buffers the two low-variability primary "
+        f"warehouses and under-buffers the one volatile secondary warehouse, because it only accounts "
+        f"for lead-time *length*, never lead-time or demand *variability*."
+    )
+
+    st.markdown("---")
+    st.subheader("Shrinkage: an order-cycle vs. shelf-life mismatch")
+    st.caption(
+        "Stockouts and safety stock are both about not holding enough. This is the opposite failure "
+        "mode: fast-moving SKUs are ordered on a flat 10-day cycle regardless of category, but Dairy "
+        "(7-day shelf life) and Fruits & Vegetables (5-day) routinely receive more stock than can "
+        "plausibly sell before it spoils. Modeled as spoilage on stock held beyond "
+        "avg_daily_demand × shelf_life_days -- see data/generate_data.py."
+    )
+    waste_by_cat = (
+        fast_inv.groupby("category")
+        .apply(lambda d: (d["wasted_units"] * d["unit_cost"]).sum(), include_groups=False)
+        .rename("waste_value_inr").reset_index()
+        .sort_values("waste_value_inr", ascending=False)
+    )
+    waste_by_store = (
+        fast_inv.groupby("store_id")
+        .apply(lambda d: (d["wasted_units"] * d["unit_cost"]).sum(), include_groups=False)
+        .rename("waste_value_inr").reset_index()
+        .sort_values("waste_value_inr", ascending=False)
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(
+            waste_by_cat, x="category", y="waste_value_inr",
+            title="Waste value (60d) by category",
+            labels={"waste_value_inr": "Waste value (₹)", "category": "Category"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig = px.bar(
+            waste_by_store, x="store_id", y="waste_value_inr",
+            title="Waste value (60d) by store — spread network-wide, unlike stockouts",
+            labels={"waste_value_inr": "Waste value (₹)", "store_id": "Store"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    total_waste = waste_by_cat["waste_value_inr"].sum()
+    st.markdown(
+        f"**₹{total_waste:,.0f} in modeled shrinkage over 60 days** — entirely in the two "
+        f"short-shelf-life categories, and spread close to evenly across all 12 stores rather than "
+        f"concentrated like the stockout problem, because it's driven by a category-level ordering "
+        f"policy (10-day cycle vs. 5–7 day shelf life), not a store- or warehouse-specific cause. "
+        f"Fixing it means shortening the order cycle for these two categories specifically — it "
+        f"doesn't touch warehouse mapping or staffing."
+    )
 
 # ---------------------------------------------------------------------------
 # Store Operations tab

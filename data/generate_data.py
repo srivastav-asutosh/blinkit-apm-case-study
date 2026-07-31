@@ -230,6 +230,20 @@ for _, s in stores.iterrows():
             lost_units = max(0.0, demand - stock)
             closing_stock = max(0, stock - units_sold)
 
+            # Shrinkage/waste: stock held beyond what could plausibly sell
+            # within the SKU's shelf life is at spoilage risk. Uses
+            # shelf_life_days directly rather than a hardcoded "perishable"
+            # list, so it naturally applies only where it should -- for
+            # long-shelf-life SKUs, base_demand * shelf_life_days is far
+            # larger than any stock level ever reached, so excess is always
+            # zero. A fixed fraction of the excess spoils each day it's held
+            # above that threshold (not all at once), so waste tapers
+            # naturally as stock is sold or ages out.
+            max_sellable_before_expiry = base_demand * sku["shelf_life_days"]
+            excess_at_risk = max(0.0, closing_stock - max_sellable_before_expiry)
+            wasted_units = excess_at_risk * 0.015
+            closing_stock = max(0.0, closing_stock - wasted_units)
+
             has_pending = len(pending_orders) > 0
             if closing_stock < reorder_point and not has_pending:
                 lead_time = max(1, round(RNG.normal(wh["base_lead_time_days"], wh["lead_time_variability"])))
@@ -264,6 +278,7 @@ for _, s in stores.iterrows():
                     "closing_stock": round(closing_stock, 1),
                     "stockout_flag": bool(stockout_flag),
                     "lost_units": round(lost_units, 1),
+                    "wasted_units": round(wasted_units, 1),
                 }
             )
             stock = closing_stock
@@ -276,7 +291,20 @@ print(f"Generated replenishment orders: {len(replenishment):,}")
 
 # ---------------------------------------------------------------------------
 # Fact: orders (store ops + last mile combined per order)
+#
+# Reseeded here, deliberately: the inventory/replenishment loop above
+# consumes a data-dependent number of RNG draws (one per replenishment event
+# triggered, and the number of those depends on stock levels -- e.g. the
+# waste model reducing closing_stock makes reorders trigger slightly more
+# often). Continuing to draw from the same shared stream would mean any
+# future tweak upstream silently reshuffles every order in the network,
+# perturbing already-reported, already-cited headline numbers (fill rate,
+# SLA adherence, lost sales value) for no real reason. Reseeding here
+# decouples the two -- orders generation is now stable regardless of how
+# many replenishment events the inventory phase produces.
 # ---------------------------------------------------------------------------
+RNG = np.random.default_rng(43)
+
 CITY_RAIN_DAYS = {
     city: set(RNG.choice(N_DAYS, size=int(N_DAYS * 0.15), replace=False))
     for city in stores["city"].unique()
@@ -445,6 +473,15 @@ if USING_TURSO:
     # existing, already-relied-on behavior rather than fighting it -- the
     # write order above is still correct regardless, this is belt and braces.
     store.execute("PRAGMA foreign_keys = OFF")
+
+    # CREATE TABLE IF NOT EXISTS is a no-op against a table that already
+    # exists with an older shape -- it does NOT add new columns. A schema
+    # change (like this run's new wasted_units column) would silently fail
+    # every subsequent insert with "no such column" until the table is
+    # dropped and recreated. Caught live against the real Turso database.
+    # FK enforcement is already off, so drop order doesn't matter.
+    all_managed_tables = [name for name, _ in TABLES] + ["upload_log"]
+    store.execute_script([f"DROP TABLE IF EXISTS {t}" for t in all_managed_tables])
 
     schema_sql = SCHEMA_SQL_PATH.read_text(encoding="utf-8")
     schema_statements = [

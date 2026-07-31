@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS fact_inventory_daily (
     closing_stock   REAL NOT NULL,
     stockout_flag   INTEGER NOT NULL CHECK (stockout_flag IN (0,1)),
     lost_units      REAL NOT NULL,
+    wasted_units    REAL NOT NULL,
     PRIMARY KEY (date, store_id, sku_id)
 );
 

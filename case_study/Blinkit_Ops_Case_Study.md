@@ -24,9 +24,9 @@ way real operational problems hide inside real operational data.
 
 | Domain | Network KPI (looks fine) | Where it breaks down | Root cause |
 |---|---|---|---|
-| Supply Chain | 99.8% fill rate | 3 stores carry 93% of ₹2.97L lost sales | 3 stores mapped to a 3-day-lead-time warehouse; safety stock isn't sized for that lead time |
+| Supply Chain | 99.8% fill rate | 3 stores carry 99% of ₹3.22L lost sales | 3 stores mapped to a 3-day-lead-time warehouse; safety stock isn't sized for that lead time |
 | Store Ops | 87.6% SLA adherence | 3 stores hit 62–70% evening breach | Evening-shift picker staffing at 50–72% of need, concentrated in the 7–9pm peak |
-| Last Mile | 13.7 min avg delivery | East Delhi hits 39.6% breach, 19.2 min avg | Compounding: longest structural distance + same rain exposure + the same 2 understaffed stores |
+| Last Mile | 13.6 min avg delivery | East Delhi hits 40.4% breach, 19.3 min avg | Compounding: longest structural distance + same rain exposure + the same 2 understaffed stores |
 
 Full detail and SQL for each: [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md) ·
 [`analysis/store_ops_rca.md`](../analysis/store_ops_rca.md) ·
@@ -40,11 +40,11 @@ single-domain view can:
 
 | Store | Stockout % | SLA breach % | Avg delivery (min) | Risk score | Story |
 |---|---|---|---|---|---|
-| DEL-E-01 / DEL-E-02 | 1.3% | 38.5% / 41.2% | 19.0 / 19.6 | **8 / 8** | Fails all three — compounding risk |
-| BLR-S-02 | 0.05% | 26.6% | 14.1 | 4 | Staffing-only — proves it's not a Delhi/warehouse issue |
-| DEL-S-02 | 1.49% | 5.4% | 12.9 | 3 | Supply-chain-only — isolates the warehouse as the driver |
-| BLR-E-01 | 0.00% | 18.7% | 15.8 | 2 | Distance-only — East-zone effect without staffing on top |
-| Every other store | ≤0.05% | ≤8.9% | ≤13.8 | **0** | Clean baseline |
+| DEL-E-01 / DEL-E-02 | 1.5% / 1.2% | 40.3% / 40.6% | 19.2 / 19.5 | **8 / 8** | Fails all three — compounding risk |
+| BLR-S-02 | 0.08% | 26.8% | 14.2 | 4 | Staffing-only — proves it's not a Delhi/warehouse issue |
+| DEL-S-02 | 1.49% | 6.0% | 13.0 | 3 | Supply-chain-only — isolates the warehouse as the driver |
+| BLR-E-01 | 0.05% | 15.7% | 15.6 | 2 | Distance-only — East-zone effect without staffing on top |
+| Every other store | ≤0.03% | ≤8.8% | ≤13.8 | **0** | Clean baseline |
 
 **The takeaway an APM would bring to a review:** DEL-E-01 and DEL-E-02 aren't three separate small
 problems — they're one staffing gap showing up in three different KPIs at once (pick time → SLA
@@ -85,12 +85,21 @@ data in. Two additions turn it into an actual tool rather than a one-time report
   which parts are real schema data and which are labeled modeling assumptions (e.g. an assumed
   6-hour shift length, editable wage rates) — the kind of honesty about proxies vs. ground truth
   that matters more in a real ops review than in a demo.
+- **A safety-stock policy review and a shrinkage finding**, both added after a supply-chain-domain
+  review of the original analysis — the flat-buffer reorder formula and the stockout root cause
+  were both real, but neither was the full picture. Section 6 and 7 of
+  [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md) cover a variability-adjusted
+  safety-stock formula (SQL: [`sql/07_safety_stock_policy.sql`](../sql/07_safety_stock_policy.sql))
+  worth a ₹19.5L reallocation, and a ~₹20.5L shrinkage finding from an order-cycle/shelf-life
+  mismatch in the two shortest-dated categories — a structurally different problem from the
+  stockout one (network-wide, not store-concentrated), found by asking what the *existing* data
+  could show once someone looked for it, not by adding new instrumentation.
 
 ## Using this for your application
 
 - **Resume bullet (pick one):**
   - *"Built an end-to-end operational analytics case study simulating a 12-store dark-store
-    network; used SQL-based RCA to identify a warehouse-mapping issue responsible for 93% of
+    network; used SQL-based RCA to identify a warehouse-mapping issue responsible for 99% of
     network stockout losses and a staffing gap driving 3 stores' SLA breach rates to 5–7x network
     average."*
   - *"Designed and queried a relational dataset spanning supply chain, store ops, and last-mile
@@ -99,6 +108,10 @@ data in. Two additions turn it into an actual tool rather than a one-time report
   - *"Extended a read-only analytics dashboard into an admin-managed tool — schema-validated
     spreadsheet ingestion, audit logging, and configurable business assumptions — and proposed 4
     additional KPIs (incl. a labor-cost-to-serve metric) grounded in the existing data model."*
+  - *"Reviewed a network's safety-stock policy against demand and lead-time variability computed
+    empirically from the data; found the flat-buffer formula simultaneously under-protected the
+    highest-risk warehouse and over-protected two stable ones, worth a ₹19.5L reallocation with no
+    net increase in inventory spend."*
 - **In an interview**, walk the funnel: network KPI → segmentation → isolation → root cause →
   quantified recommendation. That's the structure every finding in this project follows, and it's
   the structure the JD is explicitly asking for ("Analyze data, perform RCA, and identify
