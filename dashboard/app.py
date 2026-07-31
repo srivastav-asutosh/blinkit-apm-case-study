@@ -386,6 +386,20 @@ def validate_upload(df, table_name):
     return df, extra, errors
 
 
+# st.cache_data has no TTL and is shared by every session in this process --
+# a process that's stayed warm since before a schema change would otherwise
+# keep serving load_data()'s stale cached DataFrame forever, regardless of
+# whether the bootstrap check above correctly detected and fixed the
+# underlying database (this is what actually broke the deployed app after
+# the bootstrap logic itself was already fixed and verified: the database
+# was fine, the in-memory cache of it wasn't). Cleared once per browser
+# session -- via st.session_state, not on every rerun -- so a fresh page
+# load always sees current data without paying a full re-fetch cost on
+# every subsequent interaction within that same session.
+if "cache_freshness_checked" not in st.session_state:
+    st.cache_data.clear()
+    st.session_state["cache_freshness_checked"] = True
+
 stores, warehouses, skus, inventory, replenishment, staffing, orders, assumptions, upload_log = load_data()
 
 # ---------------------------------------------------------------------------
