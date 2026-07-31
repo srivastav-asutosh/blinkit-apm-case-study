@@ -24,6 +24,7 @@ GENERATOR = ROOT / "data" / "generate_data.py"
 LOCK_PATH = ROOT / "db" / ".generating.lock"
 NEW_METRICS_SQL = ROOT / "sql" / "06_new_metrics.sql"
 SAFETY_STOCK_SQL = ROOT / "sql" / "07_safety_stock_policy.sql"
+FIX_ROI_SQL = ROOT / "sql" / "08_fix_roi.sql"
 
 
 def get_secret(key):
@@ -204,6 +205,17 @@ def load_safety_stock_policy():
     sql = SAFETY_STOCK_SQL.read_text(encoding="utf-8")
     stmt = "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).strip().rstrip(";")
     return store.read_sql(stmt)
+
+
+@st.cache_data
+def load_fix_roi():
+    sql = FIX_ROI_SQL.read_text(encoding="utf-8")
+    stmts = [
+        s.strip() for s in
+        "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).split(";")
+        if s.strip()
+    ]
+    return [store.read_sql(stmt) for stmt in stmts]  # [staffing_fix_roi, remap_payback]
 
 
 def log_admin_action(action, target_table=None, rows_affected=None, note=None):
@@ -657,6 +669,81 @@ with tab_rca:
         - Every other store scores **0** — a clean baseline that makes the above four stand out
           rather than the whole network looking uniformly stressed.
         """
+    )
+
+    st.markdown("---")
+    st.subheader("Cost of the fix — not just cost of the problem")
+    st.caption(
+        "Every finding above prices the problem. This section prices the two headline fixes "
+        "against it, because a recommendation without a payback number gets discussed, not funded. "
+        "SQL: sql/08_fix_roi.sql."
+    )
+    staffing_roi, remap_payback = load_fix_roi()
+
+    st.markdown("**1. Staffing fix — evening picker gap at the 3 chronic-understaffed stores**")
+    staffing_roi_view = staffing_roi.copy()
+    total_cost = staffing_roi_view["fix_cost_inr_60d"].sum()
+    total_saving = staffing_roi_view["direct_cts_saving_inr_60d"].sum()
+    coverage_pct = 100.0 * total_saving / total_cost
+
+    c1, c2 = st.columns(2)
+    with c1:
+        melted = staffing_roi_view.melt(
+            id_vars="store_id", value_vars=["fix_cost_inr_60d", "direct_cts_saving_inr_60d"],
+            var_name="metric", value_name="inr",
+        )
+        melted["metric"] = melted["metric"].map({
+            "fix_cost_inr_60d": "Fix cost (labor)", "direct_cts_saving_inr_60d": "Direct CTS saving",
+        })
+        fig = px.bar(
+            melted, x="store_id", y="inr", color="metric", barmode="group",
+            title="Staffing-fix cost vs. direct cost-to-serve saving (60d)",
+            labels={"inr": "₹ (60 days)", "store_id": "Store", "metric": ""},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        st.dataframe(
+            staffing_roi_view[["store_id", "extra_picker_hours_60d", "fix_cost_inr_60d",
+                                "direct_cts_saving_inr_60d"]]
+            .rename(columns={
+                "store_id": "Store", "extra_picker_hours_60d": "Extra picker-hours (60d)",
+                "fix_cost_inr_60d": "Fix cost (₹)", "direct_cts_saving_inr_60d": "Direct CTS saving (₹)",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+    st.markdown(
+        f"**₹{total_cost:,.0f} labor cost to close the evening staffing gap to a 90% target, "
+        f"vs. ₹{total_saving:,.0f} in direct cost-to-serve savings — only {coverage_pct:.0f}% of the "
+        f"investment pays for itself through labor efficiency alone.** This is the honest number, "
+        f"not a manufactured payback story: closing this gap is still the right call, but the "
+        f"business case for the remaining ~₹{total_cost - total_saving:,.0f} has to rest on SLA and "
+        f"customer-retention value (fewer breached deliveries at the 3 worst-performing stores in the "
+        f"network) — value this schema can't price directly, so it shouldn't be asserted as a ₹ "
+        f"figure it doesn't have. A recommendation that names its own limits is more credible than "
+        f"one that doesn't."
+    )
+
+    st.markdown("**2. Warehouse-remap payback — sensitivity across assumed project cost**")
+    st.caption(
+        "The ₹319,304/60d in lost sales at WH-DEL-SECONDARY (sql/02_supply_chain_kpis.sql, Q2) is "
+        "the revenue a remap would recover. The one-time remap/negotiation cost isn't an operational "
+        "metric this schema tracks, so payback is shown across a plausible range instead of one "
+        "invented number."
+    )
+    fig = px.bar(
+        remap_payback, x="one_time_cost_inr", y="payback_months",
+        title="Payback period by assumed one-time remap cost",
+        labels={"one_time_cost_inr": "Assumed one-time cost (₹)", "payback_months": "Payback (months)"},
+        text="payback_months",
+    )
+    fig.update_traces(texttemplate="%{text:.1f}mo", textposition="outside")
+    st.plotly_chart(fig, use_container_width=True)
+    st.markdown(
+        f"**Even at the high end of plausible remap costs (₹500,000), payback is {remap_payback['payback_months'].max():.1f} "
+        f"months — under {remap_payback['payback_months'].min():.1f} months at the low end (₹100,000).** "
+        f"This is the stronger, cleaner business case of the two: unlike the staffing fix, it doesn't "
+        f"need an SLA/customer-value argument to close — it pays for itself on recovered revenue alone, "
+        f"and fast, across the entire range of reasonable cost assumptions."
     )
 
 # ---------------------------------------------------------------------------

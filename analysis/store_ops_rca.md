@@ -81,3 +81,38 @@ network) would be expected to cut their evening SLA breach rate from 62–70% do
 network's 85%+ staffing baseline of ~7–11% — recovering the large majority of the ~5,960 evening
 orders/60d currently affected across the three stores (DEL-E-02: 1,501 · DEL-E-01: 2,146 ·
 BLR-S-02: 2,311).
+
+## 6. Cost of the fix — and an honest gap in the ROI case
+
+Section 5 prices the *problem*. This section prices the *fix* against it, because a
+recommendation without a payback number gets discussed, not funded. SQL:
+[`sql/08_fix_roi.sql`](../sql/08_fix_roi.sql) (query F1), also surfaced live in the dashboard's
+Cross-Domain RCA tab.
+
+**Fix cost:** closing the evening picker gap at the 3 chronic-understaffed stores to a 90%
+staffing target — at the current picker wage (₹120/hr, editable in the Admin panel) and a 6-hour
+shift assumption — costs **₹203,760 in incremental labor over 60 days** (642 / 624 / 432 extra
+picker-hours at BLR-S-02 / DEL-E-01 / DEL-E-02 respectively).
+
+**Direct saving:** the same staffing fix lowers cost-to-serve at these stores' evening shift
+(less overtime-shaped pick time per order). Valued against the network's healthy-store evening
+baseline (₹22.41/order) and applied to each store's evening order volume, that's **₹85,029 in
+direct cost-to-serve savings over 60 days — only 42% of the fix cost.**
+
+| Store | Extra picker-hours (60d) | Fix cost (₹) | Direct CTS saving (₹) | Coverage |
+|---|---|---|---|---|
+| BLR-S-02 | 642 | 77,040 | 20,419 | 27% |
+| DEL-E-01 | 624 | 74,880 | 39,824 | 53% |
+| DEL-E-02 | 432 | 51,840 | 24,786 | 48% |
+| **Total** | **1,698** | **203,760** | **85,029** | **42%** |
+
+**This is a deliberately honest number, not a manufactured payback story.** A pure labor-efficiency
+case does not close the gap — it covers less than half the investment. Recommending this fix
+anyway is still correct, but the business case for the remaining **~₹118,731** has to rest on
+**SLA and customer-retention value** — fewer breached deliveries at the 3 worst-performing stores
+in the network, repeat-order impact of a bad delivery experience, and the fact that DEL-E-01 /
+DEL-E-02 are the two highest cross-domain risk-score stores in the entire network (see
+[`case_study/Blinkit_Ops_Case_Study.md`](../case_study/Blinkit_Ops_Case_Study.md)) — value this
+schema has no fact table to price directly, so it should be argued qualitatively, not asserted as
+a fabricated ₹ figure. A recommendation that names its own limits is more credible in a real ops
+review than one that quietly assumes a clean payback it can't actually show.

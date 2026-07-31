@@ -94,6 +94,16 @@ data in. Two additions turn it into an actual tool rather than a one-time report
   mismatch in the two shortest-dated categories — a structurally different problem from the
   stockout one (network-wide, not store-concentrated), found by asking what the *existing* data
   could show once someone looked for it, not by adding new instrumentation.
+- **A cost-of-the-fix pass on both headline recommendations** (SQL:
+  [`sql/08_fix_roi.sql`](../sql/08_fix_roi.sql)), because a recommendation without a payback number
+  gets discussed, not funded. The two fixes turned out to look very different once priced: the
+  warehouse remap pays for itself on recovered revenue alone in 0.6–3.1 months across a wide range
+  of assumed project cost (Section 8 of
+  [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md)), while the evening-staffing
+  fix's ₹203,760 labor cost is only 42% covered by direct cost-to-serve savings — the rest has to
+  be justified on SLA/customer-retention grounds this schema can't price directly (Section 6 of
+  [`analysis/store_ops_rca.md`](../analysis/store_ops_rca.md)). Presenting the gap honestly, rather
+  than manufacturing a clean payback story, was a deliberate choice.
 
 ## Using this for your application
 
@@ -112,6 +122,10 @@ data in. Two additions turn it into an actual tool rather than a one-time report
     empirically from the data; found the flat-buffer formula simultaneously under-protected the
     highest-risk warehouse and over-protected two stable ones, worth a ₹19.5L reallocation with no
     net increase in inventory spend."*
+  - *"Quantified payback, not just cost, for two operational fixes — a warehouse remap (0.6–3.1
+    month payback across a range of assumed project cost) and an evening-staffing gap (only 42%
+    covered by direct cost-to-serve savings, requiring an explicit SLA/customer-value case for the
+    remainder) — prioritizing recommendations by ROI, not just problem size."*
 - **In an interview**, walk the funnel: network KPI → segmentation → isolation → root cause →
   quantified recommendation. That's the structure every finding in this project follows, and it's
   the structure the JD is explicitly asking for ("Analyze data, perform RCA, and identify

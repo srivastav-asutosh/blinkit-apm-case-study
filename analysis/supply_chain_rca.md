@@ -129,3 +129,30 @@ shelf life under ~14 days — concretely, cut Dairy & Breakfast and Fruits & Veg
 10-day to a 5–6 day order cycle. This trades more frequent, smaller replenishment orders for
 substantially less spoilage; at ₹20.5L over 60 days, this is the single largest ₹ figure in this
 case study, larger than the stockout loss it sits alongside.
+
+## 8. Cost of the fix — warehouse-remap payback
+
+Section 2's root cause is a warehouse-mapping problem: 3 stores sit on WH-DEL-SECONDARY, which
+runs a 3.09-day actual lead time against a 3-day contract, and it's this warehouse — not those
+stores specifically — that drives 99% of network stockout loss (₹319,304/60d, fast-moving SKUs;
+[`sql/02_supply_chain_kpis.sql`](../sql/02_supply_chain_kpis.sql) Q2). The fix is a remap (or a
+lead-time renegotiation with that warehouse) — either way, a one-time project cost this schema
+doesn't track, since it's a real-world contracting/logistics cost, not an operational metric.
+Rather than invent a single number, SQL:
+[`sql/08_fix_roi.sql`](../sql/08_fix_roi.sql) (query F2) prices payback across a plausible range:
+
+| Assumed one-time remap cost | Payback period |
+|---|---|
+| ₹100,000 | 0.6 months |
+| ₹200,000 | 1.3 months |
+| ₹350,000 | 2.2 months |
+| ₹500,000 | 3.1 months |
+
+**This is the stronger, cleaner business case of the two fixes quantified in this project**
+(compare to Section 6 of [`analysis/store_ops_rca.md`](store_ops_rca.md), where the staffing fix
+only covers 42% of its own cost through labor efficiency and has to lean on an unpriced
+SLA/customer-value argument for the rest). The warehouse remap pays for itself on recovered
+revenue alone — even at the high end of plausible one-time cost, it clears payback in about a
+quarter, and at the low end in under a month. It doesn't need a qualitative argument to close;
+the recoverable revenue and the range of realistic remap costs are simply not close to each
+other, in either direction.

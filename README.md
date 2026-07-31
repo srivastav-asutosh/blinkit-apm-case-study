@@ -52,6 +52,8 @@ sql/03_store_ops_kpis.sql     SLA adherence, staffing-ratio RCA
 sql/04_last_mile_kpis.sql     Delivery time, zone/rain/rider-load RCA
 sql/05_cross_domain_rca.sql   Composite store-level risk score across all 3 domains
 sql/06_new_metrics.sql        Perfect Order Rate, Days of Cover, Rider Utilization, Cost-to-Serve
+sql/07_safety_stock_policy.sql  Variability-adjusted safety-stock formula vs. current flat buffer
+sql/08_fix_roi.sql            Cost/payback of the two headline fixes -- staffing gap and warehouse remap
 dashboard/app.py              Streamlit + Plotly dashboard (7 tabs, incl. Admin)
 analysis/*.md                 Per-domain RCA write-ups (problem → investigation → root cause →
                                recommendation → projected impact)
