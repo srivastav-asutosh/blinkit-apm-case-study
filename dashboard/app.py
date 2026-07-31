@@ -126,6 +126,20 @@ DB_PATH.parent.mkdir(exist_ok=True)
 
 try:
     _needs_bootstrap = store.row_count("dim_stores") == 0
+    if not _needs_bootstrap:
+        # A non-empty dim_stores only proves *some* dataset was generated at
+        # some point -- not that it matches the *current* schema. A backend
+        # that was bootstrapped before a later schema change (e.g. a
+        # Streamlit Cloud instance without Turso configured, running on its
+        # own persistent local SQLite that a code-only redeploy never
+        # touches) would pass the row-count check yet be missing newer
+        # columns and crash the first time a query references one. Checking
+        # for the most recently added column (fact_orders.is_cancelled)
+        # catches that case and re-triggers the same bootstrap path below,
+        # so a stale deployment self-heals on its next load instead of
+        # crashing indefinitely until someone manually resets it.
+        _cols = store.read_sql("SELECT * FROM fact_orders LIMIT 1")
+        _needs_bootstrap = "is_cancelled" not in _cols.columns
 except Exception as e:
     # Streamlit Cloud redacts exception text on unhandled crashes regardless
     # of what it says, so an error here has to be written to the page via
