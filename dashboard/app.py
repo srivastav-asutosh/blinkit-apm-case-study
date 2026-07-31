@@ -124,22 +124,35 @@ PROBLEM_STORES = {"DEL-E-01", "DEL-E-02", "BLR-S-02", "DEL-S-02"}
 # just avoids wasted duplicate work.
 DB_PATH.parent.mkdir(exist_ok=True)
 
+# LOCK_PATH is considered stale (an earlier attempt died without cleaning up)
+# once it's older than this -- comfortably longer than the ~90s worst-case
+# Turso generation time, so a genuinely in-progress run is never reclaimed
+# out from under itself.
+LOCK_STALE_SECONDS = 300
+
+
+def _dataset_is_current():
+    """True only if the dataset exists AND matches the current schema.
+
+    A non-empty dim_stores only proves *some* dataset was generated at some
+    point -- not that it matches the *current* schema. A backend that was
+    bootstrapped before a later schema change (e.g. a Streamlit Cloud
+    instance without Turso configured, running on its own persistent local
+    SQLite that a code-only redeploy never touches) would pass a row-count
+    check yet be missing newer columns and crash the first time a query
+    references one. Checking for the most recently added column
+    (fact_orders.is_cancelled) catches that case. This single function is
+    used everywhere "is the dataset ready" is asked, so the initial check
+    and the fallback wait-loop below can't disagree with each other.
+    """
+    if store.row_count("dim_stores") == 0:
+        return False
+    cols = store.read_sql("SELECT * FROM fact_orders LIMIT 1")
+    return "is_cancelled" in cols.columns
+
+
 try:
-    _needs_bootstrap = store.row_count("dim_stores") == 0
-    if not _needs_bootstrap:
-        # A non-empty dim_stores only proves *some* dataset was generated at
-        # some point -- not that it matches the *current* schema. A backend
-        # that was bootstrapped before a later schema change (e.g. a
-        # Streamlit Cloud instance without Turso configured, running on its
-        # own persistent local SQLite that a code-only redeploy never
-        # touches) would pass the row-count check yet be missing newer
-        # columns and crash the first time a query references one. Checking
-        # for the most recently added column (fact_orders.is_cancelled)
-        # catches that case and re-triggers the same bootstrap path below,
-        # so a stale deployment self-heals on its next load instead of
-        # crashing indefinitely until someone manually resets it.
-        _cols = store.read_sql("SELECT * FROM fact_orders LIMIT 1")
-        _needs_bootstrap = "is_cancelled" not in _cols.columns
+    _needs_bootstrap = not _dataset_is_current()
 except Exception as e:
     # Streamlit Cloud redacts exception text on unhandled crashes regardless
     # of what it says, so an error here has to be written to the page via
@@ -154,6 +167,17 @@ except Exception as e:
     st.stop()
 
 if _needs_bootstrap:
+    # A lock file older than LOCK_STALE_SECONDS means whatever process
+    # created it died without cleaning up (e.g. a Streamlit Cloud restart
+    # mid-generation) -- reclaim it rather than waiting on a run that will
+    # never finish, which would otherwise wedge every future session behind
+    # a 120s timeout forever.
+    try:
+        if time.time() - LOCK_PATH.stat().st_mtime > LOCK_STALE_SECONDS:
+            LOCK_PATH.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
+
     try:
         lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.close(lock_fd)
@@ -163,9 +187,9 @@ if _needs_bootstrap:
 
     if got_lock:
         spinner_msg = (
-            "First run: generating the simulated 60-day ops dataset and loading it into "
-            "Turso (~60-90s, one-time)..." if USING_TURSO else
-            "First run: generating the simulated 60-day ops dataset (~15s)..."
+            "Generating the simulated 60-day ops dataset and loading it into "
+            "Turso (~60-90s)..." if USING_TURSO else
+            "Generating the simulated 60-day ops dataset (~15s)..."
         )
         with st.spinner(spinner_msg):
             result = subprocess.run(
@@ -180,7 +204,7 @@ if _needs_bootstrap:
     else:
         with st.spinner("Another session is generating the dataset, waiting..."):
             for _ in range(120):
-                if store.row_count("dim_stores") > 0:
+                if _dataset_is_current():
                     break
                 time.sleep(1)
             else:
