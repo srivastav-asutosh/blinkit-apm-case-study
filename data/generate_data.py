@@ -26,6 +26,11 @@ import numpy as np
 import pandas as pd
 
 RNG = np.random.default_rng(42)
+# Dedicated stream for warehouse case-fill draws, kept separate from RNG so
+# that adding this mechanism doesn't reshuffle the demand/lead-time draws
+# already consumed elsewhere in the inventory loop -- same reasoning as the
+# RNG reseed before orders generation below.
+FILL_RNG = np.random.default_rng(44)
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -50,11 +55,11 @@ N_DAYS = len(DATES)
 warehouses = pd.DataFrame(
     [
         {"warehouse_id": "WH-DEL-PRIMARY", "warehouse_name": "Delhi Primary FC", "city": "Delhi",
-         "base_lead_time_days": 1, "lead_time_variability": 0.4},
+         "base_lead_time_days": 1, "lead_time_variability": 0.4, "case_fill_rate_mean": 0.98},
         {"warehouse_id": "WH-DEL-SECONDARY", "warehouse_name": "Delhi Overflow FC", "city": "Delhi",
-         "base_lead_time_days": 3, "lead_time_variability": 1.3},
+         "base_lead_time_days": 3, "lead_time_variability": 1.3, "case_fill_rate_mean": 0.90},
         {"warehouse_id": "WH-BLR-PRIMARY", "warehouse_name": "Bangalore Primary FC", "city": "Bangalore",
-         "base_lead_time_days": 1, "lead_time_variability": 0.5},
+         "base_lead_time_days": 1, "lead_time_variability": 0.5, "case_fill_rate_mean": 0.98},
     ]
 )
 
@@ -184,10 +189,12 @@ for _, s in stores.iterrows():
                     "pickers_needed": pickers_needed,
                     "pickers_present": pickers_present,
                     "riders_on_shift": riders_on_shift,
+                    "riders_needed": max(1, round(riders_needed_shift)),
                 }
             )
 staffing = pd.DataFrame(staffing_rows)
 staffing["picker_staffing_ratio"] = (staffing["pickers_present"] / staffing["pickers_needed"]).round(2)
+staffing["rider_staffing_ratio"] = (staffing["riders_on_shift"] / staffing["riders_needed"]).round(2)
 
 # ---------------------------------------------------------------------------
 # Fact: inventory + replenishment (day-by-day simulation per store-SKU)
@@ -249,7 +256,15 @@ for _, s in stores.iterrows():
                 lead_time = max(1, round(RNG.normal(wh["base_lead_time_days"], wh["lead_time_variability"])))
                 arrival_idx = day_idx + lead_time
                 qty_ordered = round(order_qty)
-                pending_orders.append((arrival_idx, qty_ordered))
+                # Case-fill shortfall: the warehouse doesn't always ship the
+                # full ordered quantity. Drawn from a dedicated RNG stream
+                # (FILL_RNG) at the warehouse's own case_fill_rate_mean, so
+                # WH-DEL-SECONDARY -- already the slow warehouse -- is also
+                # modeled as the least reliable on quantity, independent of
+                # its lead-time variability.
+                fill_fraction = min(1.0, max(0.5, FILL_RNG.normal(wh["case_fill_rate_mean"], 0.03)))
+                qty_received = round(qty_ordered * fill_fraction)
+                pending_orders.append((arrival_idx, qty_received))
                 replenishment_rows.append(
                     {
                         "replenishment_id": f"REPL-{repl_counter:06d}",
@@ -258,6 +273,7 @@ for _, s in stores.iterrows():
                         "warehouse_id": s["warehouse_id"],
                         "order_date": d,
                         "qty_ordered": qty_ordered,
+                        "qty_received": qty_received,
                         "expected_lead_time_days": wh["base_lead_time_days"],
                         "actual_lead_time_days": lead_time,
                         "received_date": d + pd.Timedelta(days=lead_time)
@@ -412,10 +428,12 @@ print(f"Generated orders: {len(orders):,}")
 
 # ---------------------------------------------------------------------------
 # Business assumptions (single-row config table)
-# Editable later from the dashboard's Admin panel -- these are the wage
-# inputs the Cost-to-Serve metric is computed from. Defaults are rough
-# industry-plausible Indian quick-commerce hourly wages, clearly labeled as
-# assumptions rather than sourced figures.
+# Editable later from the dashboard's Admin panel -- these are the wage and
+# per-km fleet-cost inputs the Cost-to-Serve and fleet-cost metrics are
+# computed from. Defaults are rough industry-plausible Indian quick-commerce
+# figures (electricity for EV, petrol + maintenance for petrol scooters,
+# near-zero running cost for bicycles), clearly labeled as assumptions
+# rather than sourced figures.
 # ---------------------------------------------------------------------------
 business_assumptions = pd.DataFrame(
     [
@@ -423,6 +441,9 @@ business_assumptions = pd.DataFrame(
             "id": 1,
             "picker_hourly_wage_inr": 120.0,
             "rider_hourly_wage_inr": 100.0,
+            "ev_scooter_cost_per_km_inr": 1.5,
+            "petrol_scooter_cost_per_km_inr": 4.2,
+            "bicycle_cost_per_km_inr": 0.3,
             "updated_by": "system_default",
             "updated_at": pd.Timestamp.utcnow().tz_localize(None),
         }

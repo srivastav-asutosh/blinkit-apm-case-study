@@ -24,8 +24,8 @@ way real operational problems hide inside real operational data.
 
 | Domain | Network KPI (looks fine) | Where it breaks down | Root cause |
 |---|---|---|---|
-| Supply Chain | 99.8% fill rate | 3 stores carry 99% of ₹3.22L lost sales | 3 stores mapped to a 3-day-lead-time warehouse; safety stock isn't sized for that lead time |
-| Store Ops | 87.6% SLA adherence | 3 stores hit 62–70% evening breach | Evening-shift picker staffing at 50–72% of need, concentrated in the 7–9pm peak |
+| Supply Chain | 99.9% fill rate | 3 stores carry 98% of ₹2.75L lost sales | 3 stores mapped to a 3-day-lead-time warehouse that also under-ships quantity on ~every order |
+| Store Ops | 87.6% SLA adherence | 3 stores hit 62–70% evening breach | Evening-shift picker AND rider staffing at 50–72% / 56–68% of need, concentrated in the 7–9pm peak |
 | Last Mile | 13.6 min avg delivery | East Delhi hits 40.4% breach, 19.3 min avg | Compounding: longest structural distance + same rain exposure + the same 2 understaffed stores |
 
 Full detail and SQL for each: [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md) ·
@@ -40,20 +40,24 @@ single-domain view can:
 
 | Store | Stockout % | SLA breach % | Avg delivery (min) | Risk score | Story |
 |---|---|---|---|---|---|
-| DEL-E-01 / DEL-E-02 | 1.5% / 1.2% | 40.3% / 40.6% | 19.2 / 19.5 | **8 / 8** | Fails all three — compounding risk |
-| BLR-S-02 | 0.08% | 26.8% | 14.2 | 4 | Staffing-only — proves it's not a Delhi/warehouse issue |
-| DEL-S-02 | 1.49% | 6.0% | 13.0 | 3 | Supply-chain-only — isolates the warehouse as the driver |
+| DEL-E-01 | 1.24% | 40.3% | 19.2 | **8** | Fails all three — compounding risk |
+| DEL-E-02 | 0.96% | 40.6% | 19.5 | **6** | Fails SLA + delivery outright; stockout rate sits right at the scoring threshold |
+| BLR-S-02 | 0.0% | 26.8% | 14.2 | 4 | Staffing-only — proves it's not a Delhi/warehouse issue |
+| DEL-S-02 | 1.34% | 6.0% | 13.0 | 3 | Supply-chain-only — isolates the warehouse as the driver |
 | BLR-E-01 | 0.05% | 15.7% | 15.6 | 2 | Distance-only — East-zone effect without staffing on top |
-| Every other store | ≤0.03% | ≤8.8% | ≤13.8 | **0** | Clean baseline |
+| Every other store | ≤0.05% | ≤8.8% | ≤13.8 | **0** | Clean baseline |
 
 **The takeaway an APM would bring to a review:** DEL-E-01 and DEL-E-02 aren't three separate small
 problems — they're one staffing gap showing up in three different KPIs at once (pick time → SLA
 breach; rider load → last-mile delay; and the same store pair happens to sit on the slow
-warehouse too). Fixing evening-shift staffing at those two stores moves *two* of the three
-headline metrics simultaneously, which makes it the single highest-leverage recommendation in this
-case study — a materially different conclusion than "fix all three domains independently," and
-the kind of prioritization insight that only shows up once you connect the domains instead of
-reviewing them in separate meetings.
+warehouse too). DEL-E-02's stockout rate (0.96%) happens to fall just under the scoring rubric's
+1.0% "severe" cutoff — worth naming explicitly rather than rounding it up to match its sibling
+store, since a threshold this close is itself a useful thing to flag in a review, not smooth over.
+It's still ~19x the network's healthy-store stockout rate. Fixing evening-shift staffing at these
+two stores moves *two* of the three headline metrics simultaneously, which makes it the single
+highest-leverage recommendation in this case study — a materially different conclusion than "fix
+all three domains independently," and the kind of prioritization insight that only shows up once
+you connect the domains instead of reviewing them in separate meetings.
 
 ## How this was built
 
@@ -61,11 +65,13 @@ reviewing them in separate meetings.
   simulation, seeded so results are reproducible. Root causes are structural (warehouse mapping,
   shift staffing levels, zone distance) — not hand-coded onto rows — so they had to be *found*,
   not verified. See [`data/generate_data.py`](../data/generate_data.py).
-- **Analysis**: SQLite + SQL — CTEs, window functions, and bucketed RCA queries across four files
-  in [`sql/`](../sql/), one per domain plus the cross-domain composite.
-- **Dashboard**: Streamlit + Plotly, five views (Overview, Supply Chain, Store Ops, Last Mile,
-  Cross-Domain RCA) with the same findings as the write-ups, interactively explorable. See
-  [`dashboard/app.py`](../dashboard/app.py) — run with `streamlit run dashboard/app.py`.
+- **Analysis**: SQLite + SQL — CTEs, window functions, and bucketed RCA queries across ten files
+  in [`sql/`](../sql/): one per domain, the cross-domain composite, four new metrics, and follow-on
+  findings (safety stock, cost-of-fix ROI, case-fill rate, fleet cost efficiency).
+- **Dashboard**: Streamlit + Plotly, seven tabs (Overview, Supply Chain, Store Ops, Last Mile,
+  Cross-Domain RCA, New Metrics, Admin) with the same findings as the write-ups, interactively
+  explorable. See [`dashboard/app.py`](../dashboard/app.py) — run with
+  `streamlit run dashboard/app.py`.
 
 ## Beyond the demo: an ingestion layer and four new metrics
 
@@ -90,26 +96,45 @@ data in. Two additions turn it into an actual tool rather than a one-time report
   were both real, but neither was the full picture. Section 6 and 7 of
   [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md) cover a variability-adjusted
   safety-stock formula (SQL: [`sql/07_safety_stock_policy.sql`](../sql/07_safety_stock_policy.sql))
-  worth a ₹19.5L reallocation, and a ~₹20.5L shrinkage finding from an order-cycle/shelf-life
+  worth a ₹21.0L reallocation, and a ~₹18.5L shrinkage finding from an order-cycle/shelf-life
   mismatch in the two shortest-dated categories — a structurally different problem from the
   stockout one (network-wide, not store-concentrated), found by asking what the *existing* data
   could show once someone looked for it, not by adding new instrumentation.
 - **A cost-of-the-fix pass on both headline recommendations** (SQL:
   [`sql/08_fix_roi.sql`](../sql/08_fix_roi.sql)), because a recommendation without a payback number
   gets discussed, not funded. The two fixes turned out to look very different once priced: the
-  warehouse remap pays for itself on recovered revenue alone in 0.6–3.1 months across a wide range
+  warehouse remap pays for itself on recovered revenue alone in 0.7–3.7 months across a wide range
   of assumed project cost (Section 8 of
   [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md)), while the evening-staffing
-  fix's ₹203,760 labor cost is only 42% covered by direct cost-to-serve savings — the rest has to
+  fix's ₹404,160 labor cost is only 21% covered by direct cost-to-serve savings — the rest has to
   be justified on SLA/customer-retention grounds this schema can't price directly (Section 6 of
   [`analysis/store_ops_rca.md`](../analysis/store_ops_rca.md)). Presenting the gap honestly, rather
   than manufacturing a clean payback story, was a deliberate choice.
+- **A second supply-chain review that found the "picker fix" was only half a fix, plus two more
+  findings from data that already existed but nothing had queried.** Going back through this
+  project like a 20-year supply-chain reviewer would surfaced three more things: (1) the
+  evening-staffing recommendation above priced picker headcount only — riders at the same 3 stores
+  are understaffed just as badly (56–68% vs. 89%+ elsewhere), and dispatch wait, the rider-driven
+  funnel stage, degrades *more* than pick time does; correcting this roughly doubled the true fix
+  cost and dropped its labor-efficiency coverage from a reported 42% to an honest 21% (Section 2
+  and 6 of [`analysis/store_ops_rca.md`](../analysis/store_ops_rca.md)); (2) the same warehouse
+  behind the stockout finding also ships incomplete orders ~99.9% of the time, short by ~10% on
+  average — a second, independent reliability failure alongside its slow lead time (Section 9 of
+  [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md), SQL:
+  [`sql/09_case_fill_rate.sql`](../sql/09_case_fill_rate.sql)); (3) `dim_riders.vehicle_type`
+  (EV/petrol/bicycle) had been generated since the very first version of this project and never
+  used — it's now a fleet cost-efficiency finding worth ~₹2.26L/60d network-wide, concentrated at
+  the same highest-risk East Delhi store (Section 6 of
+  [`analysis/last_mile_rca.md`](../analysis/last_mile_rca.md), SQL:
+  [`sql/10_fleet_cost_efficiency.sql`](../sql/10_fleet_cost_efficiency.sql)). Catching that a
+  previous version of your own analysis was incomplete, and correcting it in the open rather than
+  quietly, is itself the finding worth telling in an interview.
 
 ## Using this for your application
 
 - **Resume bullet (pick one):**
   - *"Built an end-to-end operational analytics case study simulating a 12-store dark-store
-    network; used SQL-based RCA to identify a warehouse-mapping issue responsible for 99% of
+    network; used SQL-based RCA to identify a warehouse-mapping issue responsible for 98% of
     network stockout losses and a staffing gap driving 3 stores' SLA breach rates to 5–7x network
     average."*
   - *"Designed and queried a relational dataset spanning supply chain, store ops, and last-mile
@@ -120,12 +145,18 @@ data in. Two additions turn it into an actual tool rather than a one-time report
     additional KPIs (incl. a labor-cost-to-serve metric) grounded in the existing data model."*
   - *"Reviewed a network's safety-stock policy against demand and lead-time variability computed
     empirically from the data; found the flat-buffer formula simultaneously under-protected the
-    highest-risk warehouse and over-protected two stable ones, worth a ₹19.5L reallocation with no
+    highest-risk warehouse and over-protected two stable ones, worth a ₹21.0L reallocation with no
     net increase in inventory spend."*
-  - *"Quantified payback, not just cost, for two operational fixes — a warehouse remap (0.6–3.1
-    month payback across a range of assumed project cost) and an evening-staffing gap (only 42%
+  - *"Quantified payback, not just cost, for two operational fixes — a warehouse remap (0.7–3.7
+    month payback across a range of assumed project cost) and an evening-staffing gap (only 21%
     covered by direct cost-to-serve savings, requiring an explicit SLA/customer-value case for the
     remainder) — prioritizing recommendations by ROI, not just problem size."*
+  - *"Re-audited my own prior RCA and found an incomplete fix: a staffing recommendation had priced
+    picker headcount only, missing that riders at the same stores were understaffed just as badly
+    and drove the larger share of the delay — correcting it roughly doubled the true fix cost and
+    halved its reported ROI coverage. Also surfaced a second warehouse reliability failure
+    (case-fill rate, not just lead time) and a ₹2.26L/60d fleet cost-efficiency finding from an
+    existing but previously unused data field."*
 - **In an interview**, walk the funnel: network KPI → segmentation → isolation → root cause →
   quantified recommendation. That's the structure every finding in this project follows, and it's
   the structure the JD is explicitly asking for ("Analyze data, perform RCA, and identify

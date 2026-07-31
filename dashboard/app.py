@@ -25,6 +25,9 @@ LOCK_PATH = ROOT / "db" / ".generating.lock"
 NEW_METRICS_SQL = ROOT / "sql" / "06_new_metrics.sql"
 SAFETY_STOCK_SQL = ROOT / "sql" / "07_safety_stock_policy.sql"
 FIX_ROI_SQL = ROOT / "sql" / "08_fix_roi.sql"
+CASE_FILL_SQL = ROOT / "sql" / "09_case_fill_rate.sql"
+FLEET_COST_SQL = ROOT / "sql" / "10_fleet_cost_efficiency.sql"
+STORE_OPS_SQL = ROOT / "sql" / "03_store_ops_kpis.sql"
 
 
 def get_secret(key):
@@ -70,7 +73,7 @@ UPLOADABLE_TABLES = {
     },
     "fact_staffing_daily": {
         "columns": ["date", "store_id", "shift", "pickers_needed", "pickers_present",
-                    "riders_on_shift", "picker_staffing_ratio"],
+                    "riders_on_shift", "riders_needed", "picker_staffing_ratio", "rider_staffing_ratio"],
         "default_mode": "append",
         "bool_cols": [],
     },
@@ -82,7 +85,8 @@ UPLOADABLE_TABLES = {
     },
     "fact_replenishment": {
         "columns": ["replenishment_id", "store_id", "sku_id", "warehouse_id", "order_date",
-                    "qty_ordered", "expected_lead_time_days", "actual_lead_time_days", "received_date"],
+                    "qty_ordered", "qty_received", "expected_lead_time_days", "actual_lead_time_days",
+                    "received_date"],
         "default_mode": "append",
         "bool_cols": [],
     },
@@ -216,6 +220,35 @@ def load_fix_roi():
         if s.strip()
     ]
     return [store.read_sql(stmt) for stmt in stmts]  # [staffing_fix_roi, remap_payback]
+
+
+@st.cache_data
+def load_case_fill_rate():
+    sql = CASE_FILL_SQL.read_text(encoding="utf-8")
+    stmts = [
+        s.strip() for s in
+        "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).split(";")
+        if s.strip()
+    ]
+    return [store.read_sql(stmt) for stmt in stmts]  # [fill_rate_by_wh, shortfall_frequency]
+
+
+@st.cache_data
+def load_fleet_cost():
+    sql = FLEET_COST_SQL.read_text(encoding="utf-8")
+    stmt = "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).strip().rstrip(";")
+    return store.read_sql(stmt)
+
+
+@st.cache_data
+def load_rider_staffing():
+    sql = STORE_OPS_SQL.read_text(encoding="utf-8")
+    stmts = [
+        s.strip() for s in
+        "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).split(";")
+        if s.strip()
+    ]
+    return [store.read_sql(stmt) for stmt in stmts]  # [Q1..Q7] -- Q6, Q7 (idx 5, 6) are the rider views
 
 
 def log_admin_action(action, target_table=None, rows_affected=None, note=None):
@@ -528,6 +561,54 @@ with tab_supply:
         f"doesn't touch warehouse mapping or staffing."
     )
 
+    st.markdown("---")
+    st.subheader("Case-fill rate: a second, independent warehouse reliability problem")
+    st.caption(
+        "Lead time (above) measures whether a warehouse ships on time. This measures whether it "
+        "ships the full quantity ordered. They're different failure modes with different fixes -- "
+        "SQL: sql/09_case_fill_rate.sql."
+    )
+    fill_rate_by_wh, shortfall_freq = load_case_fill_rate()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(
+            fill_rate_by_wh, x="warehouse_id", y="case_fill_rate_pct",
+            title="Case-fill rate by warehouse",
+            labels={"case_fill_rate_pct": "Case-fill rate (%)", "warehouse_id": "Warehouse"},
+        )
+        fig.update_yaxes(range=[85, 100])
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig = px.bar(
+            shortfall_freq, x="warehouse_id", y="pct_orders_shorted",
+            title="% of replenishment orders shorted, by warehouse",
+            labels={"pct_orders_shorted": "Orders shorted (%)", "warehouse_id": "Warehouse"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(
+        fill_rate_by_wh.merge(shortfall_freq, on="warehouse_id")
+        .rename(columns={
+            "warehouse_id": "Warehouse", "base_lead_time_days": "Contracted lead time (days)",
+            "avg_actual_lead_time_days": "Avg actual lead time (days)",
+            "case_fill_rate_pct": "Case-fill rate (%)", "total_units_shorted": "Total units shorted (60d)",
+            "replenishment_orders": "Replenishment orders", "pct_orders_shorted": "Orders shorted (%)",
+            "avg_shortfall_pct_when_shorted": "Avg shortfall when shorted (%)",
+        }),
+        use_container_width=True, hide_index=True,
+    )
+    wh_worst = fill_rate_by_wh.iloc[0]
+    st.markdown(
+        f"**WH-DEL-SECONDARY doesn't just run a slower lead time — it ships an incomplete order "
+        f"{shortfall_freq.iloc[0]['pct_orders_shorted']:.0f}% of the time**, short by "
+        f"{shortfall_freq.iloc[0]['avg_shortfall_pct_when_shorted']:.0f}% on average when it happens, "
+        f"vs. the two primary warehouses shorting ~68–70% of orders by only ~3.5%. This is a second, "
+        f"independent driver behind the same warehouse's stockout numbers (sql/02_supply_chain_kpis.sql "
+        f"Q2) — not just slower, also less reliable on quantity. A remap or a warehouse-side "
+        f"inventory-accuracy fix addresses both at once; a lead-time fix alone would not."
+    )
+
 # ---------------------------------------------------------------------------
 # Store Operations tab
 # ---------------------------------------------------------------------------
@@ -579,6 +660,50 @@ with tab_store_ops:
     fig.update_layout(title="Avg picker staffing ratio by store & shift", height=420)
     st.plotly_chart(fig, use_container_width=True)
 
+    st.markdown("---")
+    st.subheader("Riders are understaffed too — not just pickers")
+    st.caption(
+        "The funnel breakdown above shows dispatch wait (rider-driven) degrades *more* than pick "
+        "time (rider-driven +49% vs. picker-driven +36% at the worst 3 stores). This section checks "
+        "whether that's because riders are short-staffed just as badly. SQL: sql/03_store_ops_kpis.sql, "
+        "Q6/Q7."
+    )
+    rider_stmts = load_rider_staffing()
+    rider_bucket = rider_stmts[6]
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(rider_bucket, x="rider_staffing_bucket", y="sla_breach_pct",
+                     title="SLA breach % by rider-staffing bucket (peak hours)",
+                     labels={"rider_staffing_bucket": "Rider staffing ratio", "sla_breach_pct": "SLA breach (%)"})
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig = px.bar(rider_bucket, x="rider_staffing_bucket", y="avg_dispatch_wait_min",
+                     title="Avg dispatch wait (min) by rider-staffing bucket",
+                     labels={"rider_staffing_bucket": "Rider staffing ratio", "avg_dispatch_wait_min": "Avg dispatch wait (min)"})
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Rider staffing ratio heatmap: store x shift")
+    rheat = staff_f.groupby(["store_id", "shift"])["rider_staffing_ratio"].mean().reset_index()
+    rheat_pivot = rheat.pivot(index="store_id", columns="shift", values="rider_staffing_ratio")
+    rheat_pivot = rheat_pivot[[c for c in shift_order if c in rheat_pivot.columns]]
+    fig = go.Figure(data=go.Heatmap(
+        z=rheat_pivot.values, x=rheat_pivot.columns, y=rheat_pivot.index,
+        colorscale="RdYlGn", zmid=0.85, text=rheat_pivot.round(2).values,
+        texttemplate="%{text}",
+    ))
+    fig.update_layout(title="Avg rider staffing ratio by store & shift", height=420)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown(
+        "**The same 3 stores are just as understaffed on riders as on pickers** (evening rider "
+        "staffing ratio 56–68% vs. 89%+ everywhere else — sql/03 Q6) — and SLA breach at the most "
+        "rider-understaffed bucket (99.73%) is essentially identical to the most picker-understaffed "
+        "bucket. **The original fix recommendation only priced picker headcount.** It's corrected "
+        "in Section 6 of [`analysis/store_ops_rca.md`](../analysis/store_ops_rca.md) and the "
+        "Cross-Domain RCA tab's cost-of-fix section — the true fix, and its true cost, includes both."
+    )
+
 # ---------------------------------------------------------------------------
 # Last Mile tab
 # ---------------------------------------------------------------------------
@@ -624,6 +749,51 @@ with tab_last_mile:
     fig = px.line(hourly, x="hour", y="sla_breach_pct", markers=True,
                   title="East Delhi: SLA breach % by hour of day")
     st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Fleet cost efficiency by vehicle type")
+    st.caption(
+        "dim_riders tracks each rider's vehicle type (EV Scooter / Petrol Scooter / Bicycle) but "
+        "until now nothing used it -- Cost-to-Serve (New Metrics tab) prices labor time only, never "
+        "the vehicle itself. This turns it into a real cost lever. Per-km costs are editable "
+        "assumptions in the Admin panel. SQL: sql/10_fleet_cost_efficiency.sql."
+    )
+    fleet_cost = load_fleet_cost()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(
+            fleet_cost.sort_values("ev_pct"), x="store_id", y="ev_pct",
+            title="EV share of fleet, by store",
+            labels={"ev_pct": "EV Scooter share (%)", "store_id": "Store"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig = px.bar(
+            fleet_cost.sort_values("potential_saving_inr_60d", ascending=False),
+            x="store_id", y="potential_saving_inr_60d",
+            title="Potential saving (60d) vs. an all-EV reference fleet",
+            labels={"potential_saving_inr_60d": "Potential saving (₹, reference only)", "store_id": "Store"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    total_current = fleet_cost["current_fleet_cost_inr_60d"].sum()
+    total_ev_ref = fleet_cost["all_ev_reference_cost_inr_60d"].sum()
+    total_saving = fleet_cost["potential_saving_inr_60d"].sum()
+    worst = fleet_cost.sort_values("potential_saving_inr_60d", ascending=False).iloc[0]
+    st.markdown(
+        f"**Network fleet running cost is ₹{total_current:,.0f}/60d under the current vehicle mix, "
+        f"vs. ₹{total_ev_ref:,.0f} under an all-EV reference fleet — a ₹{total_saving:,.0f} "
+        f"upper-bound gap.** The all-EV figure is a reference ceiling, not a literal recommendation "
+        f"(bicycles have real range/capacity limits that rule them out on longer routes, and full EV "
+        f"conversion has its own switching costs this schema doesn't price). The more actionable "
+        f"read: cost efficiency varies more than 2x across stores purely from fleet-mix differences "
+        f"(₹{fleet_cost['blended_cost_per_km_inr'].min():.2f}–₹{fleet_cost['blended_cost_per_km_inr'].max():.2f} "
+        f"per km), and **{worst['store_id']} — already one of the two highest cross-domain risk "
+        f"stores in the network — also has the least cost-efficient fleet** at only "
+        f"{worst['ev_pct']:.0f}% EV. Reducing petrol-scooter reliance specifically at the "
+        f"highest-distance, highest-volume stores is the realistic version of this lever."
+    )
 
 # ---------------------------------------------------------------------------
 # Cross-domain RCA tab
@@ -680,7 +850,14 @@ with tab_rca:
     )
     staffing_roi, remap_payback = load_fix_roi()
 
-    st.markdown("**1. Staffing fix — evening picker gap at the 3 chronic-understaffed stores**")
+    st.markdown("**1. Staffing fix — evening picker AND rider gap at the 3 chronic-understaffed stores**")
+    st.caption(
+        "This originally priced picker headcount only. sql/03_store_ops_kpis.sql Q6/Q7 (Store "
+        "Operations tab) showed riders are understaffed just as badly, and dispatch wait — the "
+        "rider-driven funnel stage — degrades *more* than pick time. Cost-to-serve already blends "
+        "both, so pricing pickers alone was claiming a saving that came partly from a fix that "
+        "was never actually costed. Corrected below."
+    )
     staffing_roi_view = staffing_roi.copy()
     total_cost = staffing_roi_view["fix_cost_inr_60d"].sum()
     total_saving = staffing_roi_view["direct_cts_saving_inr_60d"].sum()
@@ -693,42 +870,45 @@ with tab_rca:
             var_name="metric", value_name="inr",
         )
         melted["metric"] = melted["metric"].map({
-            "fix_cost_inr_60d": "Fix cost (labor)", "direct_cts_saving_inr_60d": "Direct CTS saving",
+            "fix_cost_inr_60d": "Fix cost (picker + rider labor)", "direct_cts_saving_inr_60d": "Direct CTS saving",
         })
         fig = px.bar(
             melted, x="store_id", y="inr", color="metric", barmode="group",
-            title="Staffing-fix cost vs. direct cost-to-serve saving (60d)",
+            title="Staffing-fix cost (pickers + riders) vs. direct cost-to-serve saving (60d)",
             labels={"inr": "₹ (60 days)", "store_id": "Store", "metric": ""},
         )
         st.plotly_chart(fig, use_container_width=True)
     with c2:
         st.dataframe(
-            staffing_roi_view[["store_id", "extra_picker_hours_60d", "fix_cost_inr_60d",
-                                "direct_cts_saving_inr_60d"]]
+            staffing_roi_view[["store_id", "extra_picker_hours_60d", "extra_rider_hours_60d",
+                                "fix_cost_inr_60d", "direct_cts_saving_inr_60d"]]
             .rename(columns={
                 "store_id": "Store", "extra_picker_hours_60d": "Extra picker-hours (60d)",
+                "extra_rider_hours_60d": "Extra rider-hours (60d)",
                 "fix_cost_inr_60d": "Fix cost (₹)", "direct_cts_saving_inr_60d": "Direct CTS saving (₹)",
             }),
             use_container_width=True, hide_index=True,
         )
     st.markdown(
-        f"**₹{total_cost:,.0f} labor cost to close the evening staffing gap to a 90% target, "
-        f"vs. ₹{total_saving:,.0f} in direct cost-to-serve savings — only {coverage_pct:.0f}% of the "
-        f"investment pays for itself through labor efficiency alone.** This is the honest number, "
-        f"not a manufactured payback story: closing this gap is still the right call, but the "
-        f"business case for the remaining ~₹{total_cost - total_saving:,.0f} has to rest on SLA and "
-        f"customer-retention value (fewer breached deliveries at the 3 worst-performing stores in the "
-        f"network) — value this schema can't price directly, so it shouldn't be asserted as a ₹ "
-        f"figure it doesn't have. A recommendation that names its own limits is more credible than "
-        f"one that doesn't."
+        f"**₹{total_cost:,.0f} labor cost to close the evening staffing gap (pickers + riders) to a "
+        f"90% target, vs. ₹{total_saving:,.0f} in direct cost-to-serve savings — only "
+        f"{coverage_pct:.0f}% of the investment pays for itself through labor efficiency alone.** "
+        f"The saving figure hasn't changed from the picker-only version (cost-to-serve already "
+        f"blended both effects) — only the true cost has, which means the real coverage is lower "
+        f"than what was previously reported. This is the honest number, not a manufactured payback "
+        f"story: closing this gap is still the right call, but the business case for the remaining "
+        f"~₹{total_cost - total_saving:,.0f} has to rest on SLA and customer-retention value (fewer "
+        f"breached deliveries at the 3 worst-performing stores in the network) — value this schema "
+        f"can't price directly, so it shouldn't be asserted as a ₹ figure it doesn't have. A "
+        f"recommendation that names its own limits is more credible than one that doesn't."
     )
 
     st.markdown("**2. Warehouse-remap payback — sensitivity across assumed project cost**")
     st.caption(
-        "The ₹319,304/60d in lost sales at WH-DEL-SECONDARY (sql/02_supply_chain_kpis.sql, Q2) is "
-        "the revenue a remap would recover. The one-time remap/negotiation cost isn't an operational "
-        "metric this schema tracks, so payback is shown across a plausible range instead of one "
-        "invented number."
+        "sql/02_supply_chain_kpis.sql Q2's lost-sales figure at WH-DEL-SECONDARY is the revenue a "
+        "remap (or a case-fill-rate fix — see the Supply Chain tab) would recover. The one-time "
+        "remap/negotiation cost isn't an operational metric this schema tracks, so payback is shown "
+        "across a plausible range instead of one invented number."
     )
     fig = px.bar(
         remap_payback, x="one_time_cost_inr", y="payback_months",
@@ -877,16 +1057,30 @@ with tab_admin:
                 rider_wage = ac2.number_input(
                     "Rider hourly wage (₹)", min_value=0.0, value=float(wage["rider_hourly_wage_inr"]), step=5.0
                 )
+                st.caption("Fleet running cost per km, by vehicle type")
+                ac3, ac4, ac5 = st.columns(3)
+                ev_cost = ac3.number_input(
+                    "EV Scooter (₹/km)", min_value=0.0, value=float(wage["ev_scooter_cost_per_km_inr"]), step=0.1
+                )
+                petrol_cost = ac4.number_input(
+                    "Petrol Scooter (₹/km)", min_value=0.0, value=float(wage["petrol_scooter_cost_per_km_inr"]), step=0.1
+                )
+                bicycle_cost = ac5.number_input(
+                    "Bicycle (₹/km)", min_value=0.0, value=float(wage["bicycle_cost_per_km_inr"]), step=0.1
+                )
                 if st.form_submit_button("Save assumptions"):
                     store.execute(
                         "UPDATE business_assumptions SET picker_hourly_wage_inr=?, rider_hourly_wage_inr=?, "
+                        "ev_scooter_cost_per_km_inr=?, petrol_scooter_cost_per_km_inr=?, bicycle_cost_per_km_inr=?, "
                         "updated_by=?, updated_at=? WHERE id=1",
-                        [picker_wage, rider_wage, "admin_panel", datetime.now(timezone.utc).isoformat(timespec="seconds")],
+                        [picker_wage, rider_wage, ev_cost, petrol_cost, bicycle_cost,
+                         "admin_panel", datetime.now(timezone.utc).isoformat(timespec="seconds")],
                     )
-                    log_admin_action("update_assumptions", "business_assumptions", 1,
-                                      f"picker=₹{picker_wage}/hr, rider=₹{rider_wage}/hr")
+                    log_admin_action("update_assumptions", "business_assumptions",
+                                      1, f"picker=₹{picker_wage}/hr, rider=₹{rider_wage}/hr, "
+                                      f"ev=₹{ev_cost}/km, petrol=₹{petrol_cost}/km, bicycle=₹{bicycle_cost}/km")
                     refresh_after_write()
-                    st.success("Saved. Cost-to-Serve will recompute with the new wages.")
+                    st.success("Saved. Cost-to-Serve and fleet-cost metrics will recompute with the new assumptions.")
                     st.rerun()
 
             st.markdown("---")
@@ -950,11 +1144,15 @@ with tab_admin:
                 m_riders = sc5.number_input("Riders on shift", min_value=0, value=SIZE_RIDERS[size_tier] // 2, step=1)
                 if st.form_submit_button("Log shift"):
                     ratio = round(m_present / needed, 2) if needed else 0
+                    riders_needed = max(1, round(SIZE_RIDERS[size_tier] * (0.5 if m_shift in ("Morning", "Night") else 0.75)))
+                    rider_ratio = round(m_riders / riders_needed, 2) if riders_needed else 0
                     store.execute(
                         "INSERT OR REPLACE INTO fact_staffing_daily "
-                        "(date, store_id, shift, pickers_needed, pickers_present, riders_on_shift, picker_staffing_ratio) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        [m_date.isoformat(), m_store, m_shift, needed, m_present, m_riders, ratio],
+                        "(date, store_id, shift, pickers_needed, pickers_present, riders_on_shift, "
+                        "riders_needed, picker_staffing_ratio, rider_staffing_ratio) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [m_date.isoformat(), m_store, m_shift, needed, m_present, m_riders,
+                         riders_needed, ratio, rider_ratio],
                     )
                     log_admin_action("manual_entry", "fact_staffing_daily", 1,
                                       f"{m_store} {m_date} {m_shift}")

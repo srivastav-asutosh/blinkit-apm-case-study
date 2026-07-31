@@ -1,4 +1,4 @@
-# RCA: Evening-Peak SLA Breaches Driven by Picker Understaffing
+# RCA: Evening-Peak SLA Breaches Driven by Picker AND Rider Understaffing
 
 **Domain:** Store Operations
 **Data:** `fact_orders`, `fact_staffing_daily`, 75,377 orders across 12 stores × 60 days
@@ -14,7 +14,7 @@ versus 4–23% everywhere else in the same shift (`sql/03_store_ops_kpis.sql`, Q
 
 The three worst stores are exactly the three flagged `chronic_understaffed` in the staffing data —
 so the question is whether staffing is actually the driver, or just a correlated coincidence.
-Three cuts confirm it's causal, not coincidental:
+Four cuts confirm it's causal, not coincidental:
 
 **a) SLA breach rate rises sharply as picker staffing ratio drops (peak hours only, Q2):**
 
@@ -52,27 +52,52 @@ is entirely a peak-hour staffing-coverage gap, not a store capability or process
 | Travel time | 6.97 min | 9.69 min | +39% |
 | **Total** | **12.69 min** | **17.31 min** | **+36%** |
 
-Pack time is identical — confirming the packing stage isn't implicated at all. Pick time and
-dispatch wait (both staffing-sensitive: pickers and riders respectively) show the largest relative
-jumps, consistent with a staffing-coverage root cause rather than a distance or demand-volume one.
+Pack time is identical — confirming the packing stage isn't implicated at all. Dispatch wait
+(rider-driven, **+49%**) degrades *more* than pick time (picker-driven, **+36%**) — the largest
+relative jump of any stage — which raised the question answered in cut (d): is dispatch wait
+elevated because riders are understaffed too, or just because pickers are?
+
+**d) Riders are understaffed by just as much as pickers, at the same 3 stores (Q6/Q7):**
+
+| Rider staffing (peak hours) | Orders | Avg dispatch wait | SLA breach rate |
+|---|---|---|---|
+| < 70% | 2,969 | 5.42 min | **99.73%** |
+| 70–85% | 4,505 | 2.96 min | 34.30% |
+| 85–100% | 12,475 | 1.58 min | 10.78% |
+| 100%+ | 9,140 | 1.31 min | 10.81% |
+
+| Store | Evening rider staffing ratio | Evening rider shortfall (avg) |
+|---|---|---|
+| DEL-E-01 | 57% | 3.0 riders |
+| BLR-S-02 | 56% | 3.0 riders |
+| DEL-E-02 | 68% | 1.3 riders |
+
+This is the exact mirror of cut (a) for pickers — same 3 stores, same magnitude of shortfall, same
+collapse in the severely-understaffed bucket. **The original version of this RCA treated the
+problem as picker-only.** It wasn't: riders are short by just as much, and dispatch wait — the
+stage riders drive — degrades more than pick time does.
 
 ## 3. Root cause
 
 Evening-shift scheduling at DEL-E-01, DEL-E-02, and BLR-S-02 runs at 50–72% of required picker
-headcount (vs. 85–105% at every other store/shift), concentrated specifically in the 7–9pm demand
-peak. This is a **scheduling/staffing-allocation gap**, not a demand-forecasting or store-capacity
-problem — order volume at these stores isn't structurally different from peers.
+headcount **and 56–68% of required rider headcount** (vs. 85–105% picker / 89%+ rider at every
+other store/shift), concentrated specifically in the 7–9pm demand peak. This is a
+**scheduling/staffing-allocation gap affecting both roles**, not a demand-forecasting or
+store-capacity problem — order volume at these stores isn't structurally different from peers.
 
 ## 4. Recommendation
 
-1. **Fix evening-shift roster coverage at these 3 stores first** — bring picker staffing ratio to
-   ≥85% for the 6–9pm window specifically; that's where the 99% breach bucket lives.
-2. **Add a staffing-ratio threshold alert** (e.g., picker ratio < 80% during a peak window) to the
-   ops dashboard, rather than relying on end-of-day SLA numbers to surface the problem after the fact.
-3. **Investigate why these 3 specific stores under-roster evenings** — likely candidates are
-   local attrition or a scheduling-template gap; BLR-S-02 shares the pattern despite a different
-   city and warehouse, which rules out a city- or supply-chain-specific cause and points at
-   store-level scheduling practice.
+1. **Fix evening-shift roster coverage at these 3 stores first — pickers AND riders** — bring both
+   staffing ratios to ≥85–90% for the 6–9pm window specifically; that's where the 99%+ breach
+   buckets live for both roles. A picker-only fix leaves dispatch wait (the larger of the two
+   funnel-stage jumps) largely unaddressed.
+2. **Add a staffing-ratio threshold alert** (e.g., picker or rider ratio < 80% during a peak
+   window) to the ops dashboard, rather than relying on end-of-day SLA numbers to surface the
+   problem after the fact.
+3. **Investigate why these 3 specific stores under-roster evenings on both roles** — likely
+   candidates are local attrition or a scheduling-template gap; BLR-S-02 shares the pattern despite
+   a different city and warehouse, which rules out a city- or supply-chain-specific cause and
+   points at store-level scheduling practice.
 
 ## 5. Projected impact
 
@@ -89,30 +114,41 @@ recommendation without a payback number gets discussed, not funded. SQL:
 [`sql/08_fix_roi.sql`](../sql/08_fix_roi.sql) (query F1), also surfaced live in the dashboard's
 Cross-Domain RCA tab.
 
-**Fix cost:** closing the evening picker gap at the 3 chronic-understaffed stores to a 90%
-staffing target — at the current picker wage (₹120/hr, editable in the Admin panel) and a 6-hour
-shift assumption — costs **₹203,760 in incremental labor over 60 days** (642 / 624 / 432 extra
-picker-hours at BLR-S-02 / DEL-E-01 / DEL-E-02 respectively).
+**This section originally priced picker headcount only.** Cut (d) above shows that was pricing
+half the fix — riders are understaffed by just as much, and dispatch wait (the rider-driven
+funnel stage) degrades *more* than pick time does. The numbers below now include both.
+
+**Fix cost:** closing the evening picker gap AND the evening rider gap at the 3
+chronic-understaffed stores to a 90% staffing target — at current wages (picker ₹120/hr, rider
+₹100/hr, both editable in the Admin panel) and a 6-hour shift assumption — costs **₹404,160 in
+incremental labor over 60 days**, roughly double the picker-only figure this RCA originally cited.
 
 **Direct saving:** the same staffing fix lowers cost-to-serve at these stores' evening shift
-(less overtime-shaped pick time per order). Valued against the network's healthy-store evening
+(cost-to-serve blends pick+pack time, picker-driven, with dispatch+travel time, rider-driven — so
+this saving figure was already implicitly pricing the benefit of fixing *both* gaps, even before
+the fix cost caught up to include both). Valued against the network's healthy-store evening
 baseline (₹22.41/order) and applied to each store's evening order volume, that's **₹85,029 in
-direct cost-to-serve savings over 60 days — only 42% of the fix cost.**
+direct cost-to-serve savings over 60 days — unchanged from before, but now only 21% of the true
+fix cost, not 42%.**
 
-| Store | Extra picker-hours (60d) | Fix cost (₹) | Direct CTS saving (₹) | Coverage |
-|---|---|---|---|---|
-| BLR-S-02 | 642 | 77,040 | 20,419 | 27% |
-| DEL-E-01 | 624 | 74,880 | 39,824 | 53% |
-| DEL-E-02 | 432 | 51,840 | 24,786 | 48% |
-| **Total** | **1,698** | **203,760** | **85,029** | **42%** |
+| Store | Extra picker-hours (60d) | Extra rider-hours (60d) | Fix cost (₹) | Direct CTS saving (₹) | Coverage |
+|---|---|---|---|---|---|
+| BLR-S-02 | 642 | 846 | 161,640 | 20,419 | 13% |
+| DEL-E-01 | 624 | 834 | 158,280 | 39,824 | 25% |
+| DEL-E-02 | 432 | 324 | 84,240 | 24,786 | 29% |
+| **Total** | **1,698** | **2,004** | **404,160** | **85,029** | **21%** |
 
-**This is a deliberately honest number, not a manufactured payback story.** A pure labor-efficiency
-case does not close the gap — it covers less than half the investment. Recommending this fix
-anyway is still correct, but the business case for the remaining **~₹118,731** has to rest on
-**SLA and customer-retention value** — fewer breached deliveries at the 3 worst-performing stores
-in the network, repeat-order impact of a bad delivery experience, and the fact that DEL-E-01 /
-DEL-E-02 are the two highest cross-domain risk-score stores in the entire network (see
+**This is a deliberately honest number, not a manufactured payback story — and it's a more honest
+number than this RCA originally reported.** Pricing pickers alone made the fix look like it
+covered 42% of its own cost; pricing the fix completely shows it actually covers 21%. The
+labor-efficiency case was weaker than first stated, not stronger — a correction worth surfacing
+explicitly rather than quietly. Recommending this fix anyway is still correct, but the business
+case for the remaining **~₹319,131** has to rest even more heavily on **SLA and customer-retention
+value** — fewer breached deliveries at the 3 worst-performing stores in the network, repeat-order
+impact of a bad delivery experience, and the fact that DEL-E-01 / DEL-E-02 are the two highest
+cross-domain risk-score stores in the entire network (see
 [`case_study/Blinkit_Ops_Case_Study.md`](../case_study/Blinkit_Ops_Case_Study.md)) — value this
 schema has no fact table to price directly, so it should be argued qualitatively, not asserted as
-a fabricated ₹ figure. A recommendation that names its own limits is more credible in a real ops
-review than one that quietly assumes a clean payback it can't actually show.
+a fabricated ₹ figure. A recommendation that names its own limits — and corrects them when a
+deeper look finds more — is more credible in a real ops review than one that quietly assumes a
+clean payback it can't actually show.

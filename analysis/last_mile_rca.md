@@ -69,7 +69,10 @@ why it's elevated (18.65%) but not in East Delhi's territory (39.59%).
 
 1. **Treat East Delhi (DEL-E-01, DEL-E-02) as the priority fix from the cross-domain view**
    (see `case_study/Blinkit_Ops_Case_Study.md`) — the staffing fix from the store-ops RCA directly
-   reduces rider-load stress here too, since it's the same root cause showing up in a second metric.
+   reduces rider-load stress here too, since it's the same root cause showing up in a second
+   metric. (Earlier drafts of this case study priced only the picker side of that fix; Section 6
+   of `analysis/store_ops_rca.md` now prices the rider side too, which is the half that actually
+   moves dispatch wait and therefore this domain's numbers.)
 2. **Distance-tiered promise times**: since SLA breach is structurally ~7x higher in the 3km+
    bucket, consider zone-aware promised-delivery windows rather than a flat target, so the metric
    reflects an achievable commitment rather than one that's set up to fail for far-zone customers.
@@ -84,3 +87,24 @@ requiring operational change; rain-day surge staffing is the actionable lever th
 staffing fix already recommended in the store-ops RCA is the one lever that moves both the SLA
 breach number *and* the last-mile number for East Delhi simultaneously — reinforcing it as the
 single highest-leverage fix in this case study.
+
+## 6. A separate lever: fleet cost, not delivery time
+
+Everything above is about *speed*. `dim_riders` also carries a vehicle-type dimension (EV
+Scooter / Petrol Scooter / Bicycle) that, until now, nothing in this project used — it had no
+effect on delivery time in the simulation and no query touched it. **Queries used:**
+[`sql/10_fleet_cost_efficiency.sql`](../sql/10_fleet_cost_efficiency.sql)
+
+This isn't a speed fix (vehicle mix wasn't wired into travel time, deliberately — see the caveat
+below), it's a *cost* fix: network fleet running cost is ₹765,177/60d under the current mix vs. an
+₹539,588 reference cost under an all-EV fleet, and cost efficiency varies more than 2x across
+stores (₹1.40–₹3.30/km) purely from differences in fleet composition. **DEL-E-02 — already one of
+the two highest cross-domain risk stores — also runs the least cost-efficient fleet at only 33%
+EV**, meaning it's carrying both a service problem and an avoidable cost problem simultaneously.
+
+**Caveat, stated deliberately:** vehicle type was *not* wired into the travel-time simulation
+itself, specifically to avoid re-perturbing every already-cited last-mile number a second time
+(the same RNG-stream lesson learned earlier in this project's build). The cost analysis is
+therefore accurate; a claim that switching vehicle mix would also speed up deliveries would not
+be — that causal link isn't modeled here, and would need to be verified against real telemetry
+(EV vs. petrol scooter speed/reliability in actual traffic conditions) before being asserted.

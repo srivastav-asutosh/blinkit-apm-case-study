@@ -83,3 +83,42 @@ SELECT
     ROUND(AVG(total_delivery_min), 2)  AS avg_total_min
 FROM fact_orders
 GROUP BY store_group;
+
+-- ---------------------------------------------------------------------------
+-- Q6. Rider staffing shortfall ranking — the exact mirror of Q4, but for
+--     riders instead of pickers. Q5 shows dispatch wait (+49%) actually
+--     jumps *more* than pick time (+36%) at the worst 3 stores -- this query
+--     checks whether that's because riders are understaffed too, not just
+--     pickers.
+-- ---------------------------------------------------------------------------
+SELECT
+    store_id,
+    shift,
+    ROUND(AVG(rider_staffing_ratio), 2)          AS avg_rider_staffing_ratio,
+    ROUND(AVG(riders_needed - riders_on_shift), 1) AS avg_rider_shortfall,
+    COUNT(*)                                        AS shift_days
+FROM fact_staffing_daily
+GROUP BY store_id, shift
+HAVING avg_rider_staffing_ratio < 0.85
+ORDER BY avg_rider_staffing_ratio ASC;
+
+-- ---------------------------------------------------------------------------
+-- Q7. Dispatch wait & SLA breach by rider-staffing bucket, peak hours —
+--     the exact mirror of Q2, confirming dispatch wait is just as
+--     staffing-sensitive as pick time, via a *different* headcount lever.
+-- ---------------------------------------------------------------------------
+SELECT
+    CASE
+        WHEN o.riders_on_shift * 1.0 / s.riders_needed < 0.70 THEN '1. Severely understaffed (<70%)'
+        WHEN o.riders_on_shift * 1.0 / s.riders_needed < 0.85 THEN '2. Understaffed (70-85%)'
+        WHEN o.riders_on_shift * 1.0 / s.riders_needed < 1.00 THEN '3. Near full staffing (85-100%)'
+        ELSE '4. Fully staffed (100%+)'
+    END                                             AS rider_staffing_bucket,
+    COUNT(*)                                         AS orders,
+    ROUND(AVG(o.dispatch_wait_min), 2)               AS avg_dispatch_wait_min,
+    ROUND(100.0 * SUM(o.sla_breach) / COUNT(*), 2)   AS sla_breach_pct
+FROM fact_orders o
+JOIN fact_staffing_daily s ON s.store_id = o.store_id AND s.date = o.date AND s.shift = o.shift
+WHERE o.is_peak_hour = 1
+GROUP BY rider_staffing_bucket
+ORDER BY rider_staffing_bucket;

@@ -6,8 +6,8 @@
 
 ## 1. Problem statement
 
-Network-wide fill rate looks healthy at a glance (99.8% for fast-moving SKUs), but that average
-hides a concentrated problem: **3 of 12 stores account for 99.2% of an estimated ₹3.22L in lost
+Network-wide fill rate looks healthy at a glance (99.9% for fast-moving SKUs), but that average
+hides a concentrated problem: **3 of 12 stores account for 98.0% of an estimated ₹2.75L in lost
 sales value** over the 60-day window, all from fast-moving categories (Dairy & Breakfast, Fruits &
 Vegetables, Beverages, Snacks, Frozen).
 
@@ -19,29 +19,30 @@ a stockout (`sql/02_supply_chain_kpis.sql`, Q1–Q2):
 
 | Warehouse | Contracted lead time | Avg actual lead time | Stockout rate (fast movers) | Est. lost sales value |
 |---|---|---|---|---|
-| WH-DEL-SECONDARY | 3 days | 3.09 days | **1.40%** | ₹319,304 |
-| WH-BLR-PRIMARY | 1 day | 1.17 days | 0.03% | ₹1,812 |
-| WH-DEL-PRIMARY | 1 day | 1.11 days | 0.02% | ₹756 |
+| WH-DEL-SECONDARY | 3 days | 3.02 days | **1.18%** | ₹269,680 |
+| WH-BLR-PRIMARY | 1 day | 1.16 days | 0.01% | ₹4,575 |
+| WH-DEL-PRIMARY | 1 day | 1.10 days | 0.03% | ₹926 |
 
 Store-level breakdown confirms it's not a Delhi-wide issue — it's specific to the three stores
 mapped to the secondary warehouse:
 
 | Store | Warehouse | Stockout rate | Est. lost sales value (60d) |
 |---|---|---|---|
-| DEL-S-02 | WH-DEL-SECONDARY | 1.49% | ₹121,168 |
-| DEL-E-01 | WH-DEL-SECONDARY | 1.54% | ₹119,475 |
-| DEL-E-02 | WH-DEL-SECONDARY | 1.16% | ₹78,660 |
-| All other 9 stores | Primary warehouses | 0.00–0.08% | ₹0–932 each |
+| DEL-E-01 | WH-DEL-SECONDARY | 1.24% | ₹105,007 |
+| DEL-S-02 | WH-DEL-SECONDARY | 1.34% | ₹99,016 |
+| DEL-E-02 | WH-DEL-SECONDARY | 0.96% | ₹65,657 |
+| All other 9 stores | Primary warehouses | 0.00–0.05% | ₹0–3,274 each |
 
 ## 3. Root cause
 
-**It is not a reliability problem — it's a structural lead-time problem.** The secondary
-warehouse hits its contracted 3-day lead time almost exactly on average (3.09 vs. 3.0 days
-expected). The three stores mapped to it are not being under-served relative to their contract;
-the contract itself is 3x slower than what every other store in the network gets. Reorder points
-at these three stores are sized off the same demand-forecast logic used everywhere else, which
-under-provisions safety stock for a 3-day replenishment cycle versus a 1-day one — so normal
-demand variability is enough to blow through available stock before the next delivery lands.
+**It is not purely a lead-time problem — it's two independent reliability failures at the same
+warehouse.** The secondary warehouse hits its contracted 3-day lead time almost exactly on
+average (3.02 vs. 3.0 days expected), so lead-time *length* alone doesn't fully explain the loss.
+Section 9 below adds the second mechanism: the same warehouse also under-fills the quantity it
+ships, on nearly every order. Reorder points at these three stores are sized off the same
+demand-forecast logic used everywhere else, which under-provisions safety stock for a 3-day
+replenishment cycle versus a 1-day one — so normal demand variability, compounded by consistently
+short-shipped quantities, is enough to blow through available stock before the next delivery lands.
 
 Category breakdown at the affected stores (Q4) confirms the risk is concentrated in genuinely
 perishable/short-cycle categories (Dairy & Breakfast, Fruits & Vegetables) rather than spread
@@ -57,13 +58,13 @@ a 3-day gap" rather than a general operational problem at those stores.
    scale with lead time, and currently treats all stores the same regardless of which warehouse
    they're mapped to. (Section 6 below turns this into a precise, quantified fix.)
 3. **Track stockout rate by warehouse, not just by store or network average**, in the standing ops
-   review — the network-level 99.8% fill rate metric completely masked this until it was sliced by
+   review — the network-level 99.9% fill rate metric completely masked this until it was sliced by
    warehouse.
 
 ## 5. Projected impact
 
-Re-mapping (or lead-time-adjusting safety stock for) these 3 stores addresses ~99% of the
-network's fast-moving-SKU lost sales value — an estimated **₹3.19L recovered over a comparable
+Re-mapping (or fixing lead-time and case-fill reliability for) these 3 stores addresses ~98% of
+the network's fast-moving-SKU lost sales value — an estimated **₹2.70L recovered over a comparable
 60-day period**, without any change to the other 9 stores.
 
 ## 6. A second, independent finding: the safety-stock formula itself
@@ -82,12 +83,12 @@ segmented by service-level target (1.96 for fast-moving SKUs, ~97.5%; 1.28 for s
 
 | Warehouse | Lead-time std dev | Correct ROP vs. current | Gap value |
 |---|---|---|---|
-| WH-DEL-SECONDARY | **1.26 days** | **+14.5%** (under-buffered) | +₹520,529 |
-| WH-BLR-PRIMARY | 0.38 days | −30.6% (over-buffered) | −₹1,453,640 |
-| WH-DEL-PRIMARY | 0.32 days | −35.7% (over-buffered) | −₹1,017,767 |
+| WH-DEL-SECONDARY | **1.23 days** | **+12.0%** (under-buffered) | +₹429,437 |
+| WH-BLR-PRIMARY | 0.37 days | −31.2% (over-buffered) | −₹1,480,311 |
+| WH-DEL-PRIMARY | 0.30 days | −36.9% (over-buffered) | −₹1,054,014 |
 
 The secondary warehouse isn't just slower on average — its lead time is **~3.5x more variable**
-(σ = 1.26 vs. 0.32–0.38 days) than the primary warehouses. A flat buffer can't see that, so it
+(σ = 1.23 vs. 0.30–0.37 days) than the primary warehouses. A flat buffer can't see that, so it
 simultaneously under-protects the one warehouse that actually needs more cushion *and*
 over-protects the two that don't.
 
@@ -97,8 +98,8 @@ current formula has no term for variability at all.
 
 **Recommendation:** replace the flat 2-day buffer with the variability-adjusted formula above.
 This is **not a spend-more recommendation** — net across the three warehouses, the correct policy
-calls for **₹19.5L less** total safety-stock investment than the current one (−₹14.5L + −₹10.2L +
-₹5.2L), because the over-buffering at the two stable warehouses outweighs the under-buffering at
+calls for **₹21.0L less** total safety-stock investment than the current one (+₹4.3L − ₹14.8L −
+₹10.5L), because the over-buffering at the two stable warehouses outweighs the under-buffering at
 the volatile one. The fix is a reallocation, which makes it an easier sell than a net capital
 increase would be — better service at the one warehouse that needs it, funded by trimming excess
 buffer at the two that don't.
@@ -112,8 +113,8 @@ routine reorder for these two categories habitually brings in more stock than ca
 before it spoils.
 
 Modeling spoilage as a function of stock held beyond `avg_daily_demand × shelf_life_days` (the
-threshold above which a unit is at real expiry risk) shows **~₹20.5L in wasted units over 60 days,
-concentrated entirely in Fruits & Vegetables (₹13.2L) and Dairy & Breakfast (₹7.2L)** — every other
+threshold above which a unit is at real expiry risk) shows **~₹18.5L in wasted units over 60 days,
+concentrated entirely in Fruits & Vegetables (₹12.2L) and Dairy & Breakfast (₹6.4L)** — every other
 fast-moving category has a shelf life (90–180+ days) far longer than the order cycle, so the model
 correctly shows zero waste there.
 
@@ -127,32 +128,60 @@ categories, independent of everything else in this case study.
 **Recommendation:** cap the order cycle at (or below) shelf life for any category with
 shelf life under ~14 days — concretely, cut Dairy & Breakfast and Fruits & Vegetables from a
 10-day to a 5–6 day order cycle. This trades more frequent, smaller replenishment orders for
-substantially less spoilage; at ₹20.5L over 60 days, this is the single largest ₹ figure in this
+substantially less spoilage; at ₹18.5L over 60 days, this is the single largest ₹ figure in this
 case study, larger than the stockout loss it sits alongside.
 
 ## 8. Cost of the fix — warehouse-remap payback
 
 Section 2's root cause is a warehouse-mapping problem: 3 stores sit on WH-DEL-SECONDARY, which
-runs a 3.09-day actual lead time against a 3-day contract, and it's this warehouse — not those
-stores specifically — that drives 99% of network stockout loss (₹319,304/60d, fast-moving SKUs;
+runs a 3.02-day actual lead time against a 3-day contract, and it's this warehouse — not those
+stores specifically — that drives 98% of network stockout loss (₹269,680/60d, fast-moving SKUs;
 [`sql/02_supply_chain_kpis.sql`](../sql/02_supply_chain_kpis.sql) Q2). The fix is a remap (or a
-lead-time renegotiation with that warehouse) — either way, a one-time project cost this schema
-doesn't track, since it's a real-world contracting/logistics cost, not an operational metric.
-Rather than invent a single number, SQL:
+lead-time and case-fill-rate renegotiation with that warehouse — see Section 9) — either way, a
+one-time project cost this schema doesn't track, since it's a real-world contracting/logistics
+cost, not an operational metric. Rather than invent a single number, SQL:
 [`sql/08_fix_roi.sql`](../sql/08_fix_roi.sql) (query F2) prices payback across a plausible range:
 
 | Assumed one-time remap cost | Payback period |
 |---|---|
-| ₹100,000 | 0.6 months |
-| ₹200,000 | 1.3 months |
-| ₹350,000 | 2.2 months |
-| ₹500,000 | 3.1 months |
+| ₹100,000 | 0.7 months |
+| ₹200,000 | 1.5 months |
+| ₹350,000 | 2.6 months |
+| ₹500,000 | 3.7 months |
 
 **This is the stronger, cleaner business case of the two fixes quantified in this project**
-(compare to Section 6 of [`analysis/store_ops_rca.md`](store_ops_rca.md), where the staffing fix
-only covers 42% of its own cost through labor efficiency and has to lean on an unpriced
-SLA/customer-value argument for the rest). The warehouse remap pays for itself on recovered
-revenue alone — even at the high end of plausible one-time cost, it clears payback in about a
-quarter, and at the low end in under a month. It doesn't need a qualitative argument to close;
-the recoverable revenue and the range of realistic remap costs are simply not close to each
-other, in either direction.
+(compare to Section 6 of [`analysis/store_ops_rca.md`](store_ops_rca.md), where the corrected
+staffing fix only covers 21% of its own cost through labor efficiency and has to lean on an
+unpriced SLA/customer-value argument for the rest). The warehouse remap pays for itself on
+recovered revenue alone — even at the high end of plausible one-time cost, it clears payback in
+under 4 months, and at the low end in under a month. It doesn't need a qualitative argument to
+close; the recoverable revenue and the range of realistic remap costs are simply not close to
+each other, in either direction.
+
+## 9. A fourth, independent finding: case-fill rate — the warehouse's second reliability failure
+
+Section 3 treated WH-DEL-SECONDARY's problem as purely a lead-time issue. It isn't the whole
+picture: the same warehouse also under-ships the *quantity* it sends, on nearly every order.
+**Queries used:** [`sql/09_case_fill_rate.sql`](../sql/09_case_fill_rate.sql)
+
+| Warehouse | Case-fill rate | % of orders shorted | Avg shortfall when shorted |
+|---|---|---|---|
+| WH-DEL-SECONDARY | **89.97%** | **99.9%** | **9.98%** |
+| WH-DEL-PRIMARY | 97.56% | 69.5% | 3.5% |
+| WH-BLR-PRIMARY | 97.57% | 68.4% | 3.55% |
+
+Every warehouse ships slightly under the ordered quantity most of the time — that alone isn't
+unusual. What's different at WH-DEL-SECONDARY is the *severity*: when it shorts an order (which is
+nearly always), it shorts it by roughly 3x as much as the primary warehouses do. This is a
+**second, independent driver behind the same warehouse's stockout numbers** — not a restatement of
+the lead-time finding. A store on this warehouse is fighting both a longer replenishment cycle
+*and* consistently receiving less than it ordered within that cycle, which compounds faster than
+either problem would alone.
+
+**Recommendation:** whatever fix is chosen for the lead-time problem (remap or renegotiation)
+needs to explicitly include a case-fill-rate service-level target, not just a lead-time SLA — a
+warehouse that ships on time but consistently short has not actually been fixed. If a remap isn't
+immediately feasible, a warehouse-side inventory-accuracy or allocation-priority audit at
+WH-DEL-SECONDARY specifically is a lower-cost interim lever, since ~10% average shortfall on
+effectively every order suggests a systemic allocation issue rather than isolated stockouts at the
+warehouse itself.

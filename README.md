@@ -48,12 +48,14 @@ db_store.py                   Data-access layer: uniform read_sql/execute/write_
 db/blinkit_ops.db             Local SQLite database (generated, used when Turso isn't configured)
 sql/01_schema.sql             Table definitions (incl. business_assumptions, upload_log)
 sql/02_supply_chain_kpis.sql  Fill rate, stockout rate, lead-time RCA
-sql/03_store_ops_kpis.sql     SLA adherence, staffing-ratio RCA
+sql/03_store_ops_kpis.sql     SLA adherence, picker + rider staffing-ratio RCA
 sql/04_last_mile_kpis.sql     Delivery time, zone/rain/rider-load RCA
 sql/05_cross_domain_rca.sql   Composite store-level risk score across all 3 domains
 sql/06_new_metrics.sql        Perfect Order Rate, Days of Cover, Rider Utilization, Cost-to-Serve
 sql/07_safety_stock_policy.sql  Variability-adjusted safety-stock formula vs. current flat buffer
 sql/08_fix_roi.sql            Cost/payback of the two headline fixes -- staffing gap and warehouse remap
+sql/09_case_fill_rate.sql     Warehouse case-fill rate -- a second reliability dimension beyond lead time
+sql/10_fleet_cost_efficiency.sql  Fleet running cost by vehicle type (EV/petrol/bicycle) and store
 dashboard/app.py              Streamlit + Plotly dashboard (7 tabs, incl. Admin)
 analysis/*.md                 Per-domain RCA write-ups (problem → investigation → root cause →
                                recommendation → projected impact)

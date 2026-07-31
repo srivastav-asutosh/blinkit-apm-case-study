@@ -7,18 +7,26 @@
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
--- F1. Staffing fix: labor cost to close the evening picker gap to a 90%
---     target at the 3 chronic-understaffed stores, vs. the direct
---     cost-to-serve saving that closing it would produce.
+-- F1. Staffing fix: labor cost to close BOTH the evening picker gap AND the
+--     evening rider gap to a 90% target at the 3 chronic-understaffed
+--     stores, vs. the direct cost-to-serve saving that closing them would
+--     produce. Originally this only priced the picker side (sql/03 Q4) --
+--     sql/03 Q6/Q7 show riders are understaffed by just as much (and
+--     dispatch wait, the rider-driven funnel stage, degrades *more* than
+--     pick time does), so pricing pickers alone was pricing half the fix.
 --     Shift length assumed 6h (consistent with M3 in sql/06_new_metrics.sql);
---     wage from business_assumptions (editable in the Admin panel).
+--     wages from business_assumptions (editable in the Admin panel).
 --     "Direct saving" = (current evening cost-to-serve at each understaffed
 --     store − healthy-store evening cost-to-serve baseline) × evening order
---     volume. This is a labor-efficiency saving only -- it does NOT include
---     SLA/customer-retention value, which this schema can't price directly.
+--     volume. Cost-to-serve already blends pick+pack (picker-driven) and
+--     dispatch+travel (rider-driven) time, so this saving figure already
+--     reflects the benefit of fixing *both* gaps -- it does not need to be
+--     computed twice. This is a labor-efficiency saving only -- it does NOT
+--     include SLA/customer-retention value, which this schema can't price
+--     directly.
 -- ---------------------------------------------------------------------------
 WITH target AS (SELECT 0.90 AS target_ratio),
-gap_hours AS (
+picker_gap AS (
     SELECT
         s.store_id,
         SUM(MAX(0.0, (t.target_ratio * s.pickers_needed) - s.pickers_present)) AS extra_picker_headcount_days
@@ -28,12 +36,25 @@ gap_hours AS (
     WHERE s.shift = 'Evening' AND d.chronic_understaffed = 1
     GROUP BY s.store_id
 ),
+rider_gap AS (
+    SELECT
+        s.store_id,
+        SUM(MAX(0.0, (t.target_ratio * s.riders_needed) - s.riders_on_shift)) AS extra_rider_headcount_days
+    FROM fact_staffing_daily s
+    JOIN dim_stores d ON d.store_id = s.store_id
+    CROSS JOIN target t
+    WHERE s.shift = 'Evening' AND d.chronic_understaffed = 1
+    GROUP BY s.store_id
+),
 fix_cost AS (
     SELECT
-        g.store_id,
-        ROUND(g.extra_picker_headcount_days * 6.0, 1)                          AS extra_picker_hours_60d,
-        ROUND(g.extra_picker_headcount_days * 6.0 * ba.picker_hourly_wage_inr, 0) AS fix_cost_inr_60d
-    FROM gap_hours g, business_assumptions ba
+        p.store_id,
+        ROUND(p.extra_picker_headcount_days * 6.0, 1)                            AS extra_picker_hours_60d,
+        ROUND(r.extra_rider_headcount_days * 6.0, 1)                             AS extra_rider_hours_60d,
+        ROUND(p.extra_picker_headcount_days * 6.0 * ba.picker_hourly_wage_inr
+              + r.extra_rider_headcount_days * 6.0 * ba.rider_hourly_wage_inr, 0) AS fix_cost_inr_60d
+    FROM picker_gap p
+    JOIN rider_gap r ON r.store_id = p.store_id, business_assumptions ba
     WHERE ba.id = 1
 ),
 healthy_evening_cts AS (
@@ -61,6 +82,7 @@ store_evening_cts AS (
 SELECT
     fc.store_id,
     fc.extra_picker_hours_60d,
+    fc.extra_rider_hours_60d,
     fc.fix_cost_inr_60d,
     ROUND(sec.avg_cost_to_serve_inr, 2)                    AS current_evening_cts_inr,
     ROUND((SELECT avg_cost_to_serve_inr FROM healthy_evening_cts), 2) AS healthy_baseline_cts_inr,
@@ -74,8 +96,9 @@ ORDER BY fc.store_id;
 -- ---------------------------------------------------------------------------
 -- F2. Warehouse-remap payback sensitivity.
 --     sql/02_supply_chain_kpis.sql Q2 puts est_lost_sales_value_inr at
---     WH-DEL-SECONDARY at ₹319,304/60d (fast-moving SKUs) -- the revenue a
---     remap (or a lead-time fix at that warehouse) would recover. The
+--     WH-DEL-SECONDARY at roughly ₹270K/60d (fast-moving SKUs) -- the
+--     revenue a remap (or a lead-time and case-fill-rate fix at that
+--     warehouse -- see sql/09_case_fill_rate.sql) would recover. The
 --     one-time remap/negotiation cost isn't in this schema (it's a real-world
 --     project cost, not an operational metric), so this prices payback
 --     across a plausible range instead of asserting a single number.
