@@ -1,25 +1,27 @@
 # RCA: East-Zone Delivery Delays — Distance, Rider Load, and Rain
 
 **Domain:** Last Mile Operations
-**Data:** `fact_orders`, 75,377 orders across 12 stores × 60 days
+**Data:** `fact_orders`, 75,404 orders across 12 stores × 60 days
 **Queries used:** [`sql/04_last_mile_kpis.sql`](../sql/04_last_mile_kpis.sql)
 
 ## 1. Problem statement
 
 Delivery time and SLA breach rate both vary sharply by zone. East Delhi is the network's worst
-zone by a wide margin: **19.24 min average delivery (p90: 26.11 min), 39.59% SLA breach**, versus
-North Delhi's 11.64 min average / 2.90% breach — the best zone in the network (`sql/04_last_mile_kpis.sql`, Q1).
+zone by a wide margin: **19.21 min average delivery (p90: 26.02 min), 39.43% SLA breach**, versus
+North Delhi's 11.70 min average / 3.76% breach — the best zone in the network (`sql/04_last_mile_kpis.sql`, Q1).
+(Figures throughout this document exclude cancelled orders, which have no real delivery time or
+SLA outcome — see `analysis/store_ops_rca.md` Section 7.)
 
 | Zone | City | Avg delivery | p90 delivery | SLA breach |
 |---|---|---|---|---|
-| East | Delhi | **19.24 min** | 26.11 min | **39.59%** |
-| East | Bangalore | 15.77 min | 19.56 min | 18.65% |
-| West | Bangalore | 13.52 min | 16.90 min | 8.11% |
-| North | Bangalore | 12.79 min | 16.13 min | 6.83% |
-| South | Delhi | 12.65 min | 15.88 min | 4.99% |
-| South | Bangalore | 12.52 min | 17.37 min | 13.00% |
-| West | Delhi | 11.95 min | 15.12 min | 4.27% |
-| North | Delhi | 11.64 min | 14.75 min | 2.90% |
+| East | Delhi | **19.21 min** | 26.02 min | **39.43%** |
+| East | Bangalore | 15.57 min | 19.09 min | 15.80% |
+| West | Bangalore | 13.54 min | 16.95 min | 8.56% |
+| South | Delhi | 12.65 min | 15.93 min | 5.81% |
+| North | Bangalore | 12.64 min | 15.95 min | 5.88% |
+| South | Bangalore | 12.41 min | 17.21 min | 12.15% |
+| West | Delhi | 11.99 min | 15.20 min | 4.20% |
+| North | Delhi | 11.70 min | 14.85 min | 3.76% |
 
 East zones are worst in *both* cities, which points at something structural to the zone (distance)
 rather than a one-off local issue — but East Delhi is roughly 2x worse than East Bangalore, which
@@ -31,9 +33,9 @@ means distance alone doesn't explain the full gap.
 
 | Distance bucket | Avg travel time | SLA breach rate | Orders |
 |---|---|---|---|
-| < 2.0 km | 4.83 min | 4.15% | 26,340 |
-| 2.0–3.0 km | 7.71 min | 9.40% | 32,045 |
-| 3.0 km+ | 11.43 min | **30.90%** | 16,992 |
+| < 2.0 km | 4.83 min | 3.87% | 26,083 |
+| 2.0–3.0 km | 7.71 min | 9.35% | 31,514 |
+| 3.0 km+ | 11.41 min | **30.38%** | 16,430 |
 
 Breach rate rises ~7x from the shortest to longest distance bucket. East-zone stores sit at the
 long end of this curve structurally (avg distance 3.1–3.9 km vs. 1.8–2.4 km elsewhere).
@@ -42,8 +44,8 @@ long end of this curve structurally (avg distance 3.1–3.9 km vs. 1.8–2.4 km 
 
 | Condition | Avg delivery time | SLA breach rate |
 |---|---|---|
-| No rain | 13.26 min | 7.95% |
-| Rain | 16.04 min | **37.96%** |
+| No rain | 13.19 min | 7.51% |
+| Rain | 15.98 min | **38.05%** |
 
 Rain days (~15% of days, city-level) nearly 5x the breach rate on their own, independent of zone
 or staffing — this is a network-wide effect, not specific to East Delhi.
@@ -52,9 +54,9 @@ or staffing — this is a network-wide effect, not specific to East Delhi.
 
 | Orders per rider (shift-level) | Avg dispatch wait | Avg SLA breach |
 |---|---|---|
-| < 8 | 1.93 min | 8.81% |
-| 8–12 | 3.13 min | 34.64% |
-| 12+ | 4.13 min | **60.02%** |
+| < 8 | 1.94 min | 9.17% |
+| 8–12 | 3.22 min | 34.61% |
+| 12+ | 4.36 min | **66.79%** |
 
 ## 3. Root cause
 
@@ -63,7 +65,7 @@ structural delivery distance in the network, (2) the same rain exposure every De
 and (3) it's also home to two of the three chronically-understaffed stores from the store-ops RCA
 (`analysis/store_ops_rca.md`) — so rider availability is thinnest exactly where distance is
 longest. East Bangalore shows the same distance effect without the staffing compounding, which is
-why it's elevated (18.65%) but not in East Delhi's territory (39.59%).
+why it's elevated (15.80%) but not in East Delhi's territory (39.43%).
 
 ## 4. Recommendation
 
@@ -76,7 +78,7 @@ why it's elevated (18.65%) but not in East Delhi's territory (39.59%).
 2. **Distance-tiered promise times**: since SLA breach is structurally ~7x higher in the 3km+
    bucket, consider zone-aware promised-delivery windows rather than a flat target, so the metric
    reflects an achievable commitment rather than one that's set up to fail for far-zone customers.
-3. **Pre-position extra riders on forecast rain days** — the rain effect is large (7.95% → 37.96%
+3. **Pre-position extra riders on forecast rain days** — the rain effect is large (7.51% → 38.05%
    breach) and predictable a day ahead from weather forecasts, making it a proactive-staffing lever
    rather than a reactive one.
 

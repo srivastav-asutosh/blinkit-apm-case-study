@@ -1,14 +1,15 @@
 # RCA: Evening-Peak SLA Breaches Driven by Picker AND Rider Understaffing
 
 **Domain:** Store Operations
-**Data:** `fact_orders`, `fact_staffing_daily`, 75,377 orders across 12 stores × 60 days
+**Data:** `fact_orders`, `fact_staffing_daily`, 75,404 orders across 12 stores × 60 days
 **Queries used:** [`sql/03_store_ops_kpis.sql`](../sql/03_store_ops_kpis.sql)
 
 ## 1. Problem statement
 
-Network-wide SLA adherence is 87.6%, which reads as "mostly fine." Segmented by store and shift,
-three stores (**DEL-E-01, DEL-E-02, BLR-S-02**) run evening-shift SLA breach rates of **62–70%**,
-versus 4–23% everywhere else in the same shift (`sql/03_store_ops_kpis.sql`, Q1).
+Network-wide SLA adherence is 87.9%, which reads as "mostly fine." Segmented by store and shift,
+three stores (**DEL-E-01, DEL-E-02, BLR-S-02**) run evening-shift SLA breach rates of **63–69%**,
+versus 4–17% everywhere else in the same shift (`sql/03_store_ops_kpis.sql`, Q1). (Figures here
+exclude cancelled orders, which have no real SLA outcome — see Section 7.)
 
 ## 2. Investigation
 
@@ -20,10 +21,10 @@ Four cuts confirm it's causal, not coincidental:
 
 | Picker staffing (peak hours) | Orders | Avg pick time | SLA breach rate |
 |---|---|---|---|
-| < 70% | 3,406 | 7.37 min | **99.06%** |
-| 70–85% | 5,670 | 4.14 min | 28.17% |
-| 85–100% | 4,706 | 2.65 min | 6.57% |
-| 100%+ | 15,193 | 2.64 min | 10.79% |
+| < 70% | 3,203 | 7.39 min | **99.09%** |
+| 70–85% | 5,654 | 4.14 min | 28.88% |
+| 85–100% | 4,644 | 2.65 min | 6.72% |
+| 100%+ | 14,907 | 2.64 min | 9.30% |
 
 Pick time roughly triples as staffing drops below 70%, and SLA breach effectively becomes
 guaranteed. (The 85–100% vs. 100%+ bucket isn't perfectly monotonic — travel time and rain, which
@@ -34,12 +35,12 @@ unambiguous.)
 
 | Chronic understaffed | Peak hour | SLA breach rate | Orders |
 |---|---|---|---|
-| Yes | Yes | **72.42%** | 6,066 |
-| Yes | No | 11.52% | 9,854 |
-| No | Yes | 11.03% | 22,909 |
-| No | No | 3.56% | 36,548 |
+| Yes | Yes | **71.36%** | 5,793 |
+| Yes | No | 11.72% | 9,523 |
+| No | Yes | 10.48% | 22,615 |
+| No | No | 3.68% | 36,096 |
 
-The understaffed stores perform close to network-normal off-peak (11.52% vs. 11.03%) — the problem
+The understaffed stores perform close to network-normal off-peak (11.72% vs. 10.48%) — the problem
 is entirely a peak-hour staffing-coverage gap, not a store capability or process issue.
 
 **c) Funnel breakdown isolates *which* stage absorbs the delay (Q5):**
@@ -48,9 +49,9 @@ is entirely a peak-hour staffing-coverage gap, not a store capability or process
 |---|---|---|---|
 | Pick time | 2.76 min | 3.75 min | +36% |
 | Pack time | 1.10 min | 1.10 min | +0% |
-| Dispatch wait | 1.86 min | 2.77 min | +49% |
-| Travel time | 6.97 min | 9.69 min | +39% |
-| **Total** | **12.69 min** | **17.31 min** | **+36%** |
+| Dispatch wait | 1.84 min | 2.75 min | +49% |
+| Travel time | 6.96 min | 9.67 min | +39% |
+| **Total** | **12.66 min** | **17.27 min** | **+36%** |
 
 Pack time is identical — confirming the packing stage isn't implicated at all. Dispatch wait
 (rider-driven, **+49%**) degrades *more* than pick time (picker-driven, **+36%**) — the largest
@@ -61,10 +62,10 @@ elevated because riders are understaffed too, or just because pickers are?
 
 | Rider staffing (peak hours) | Orders | Avg dispatch wait | SLA breach rate |
 |---|---|---|---|
-| < 70% | 2,969 | 5.42 min | **99.73%** |
-| 70–85% | 4,505 | 2.96 min | 34.30% |
-| 85–100% | 12,475 | 1.58 min | 10.78% |
-| 100%+ | 9,140 | 1.31 min | 10.81% |
+| < 70% | 2,728 | 5.43 min | **99.74%** |
+| 70–85% | 4,416 | 2.96 min | 33.81% |
+| 85–100% | 12,261 | 1.58 min | 10.78% |
+| 100%+ | 9,003 | 1.31 min | 10.76% |
 
 | Store | Evening rider staffing ratio | Evening rider shortfall (avg) |
 |---|---|---|
@@ -102,10 +103,11 @@ store-capacity problem — order volume at these stores isn't structurally diffe
 ## 5. Projected impact
 
 Bringing these 3 stores' evening picker staffing to the 85%+ band (in line with the rest of the
-network) would be expected to cut their evening SLA breach rate from 62–70% down toward the
-network's 85%+ staffing baseline of ~7–11% — recovering the large majority of the ~5,960 evening
-orders/60d currently affected across the three stores (DEL-E-02: 1,501 · DEL-E-01: 2,146 ·
-BLR-S-02: 2,311).
+network) would be expected to cut their evening SLA breach rate from 63–69% down toward the
+network's 85%+ staffing baseline of ~7–9% — recovering the large majority of the ~3,771 evening
+orders/60d currently breached across the three stores (DEL-E-02: 980 · DEL-E-01: 1,472 ·
+BLR-S-02: 1,319; cancelled orders excluded, since they have no SLA outcome to recover — see
+Section 7).
 
 ## 6. Cost of the fix — and an honest gap in the ROI case
 

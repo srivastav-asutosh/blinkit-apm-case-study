@@ -6,6 +6,11 @@
 -- Q1. Delivery time percentiles and SLA breach by zone
 --     (SQLite has no native PERCENTILE_CONT; approximate p90 via a
 --      cumulative-distribution window function instead)
+--     Excludes cancelled orders throughout this file -- a cancelled order
+--     has no real delivery time or SLA outcome even though this model still
+--     computes hypothetical values for it before the cancellation is
+--     decided (see sql/12_order_failures.sql). Same fix as sql/03 Q1-Q3/Q5/Q7
+--     and sql/06_new_metrics.sql M1/M3.
 -- ---------------------------------------------------------------------------
 WITH ranked AS (
     SELECT
@@ -16,6 +21,7 @@ WITH ranked AS (
         PERCENT_RANK() OVER (PARTITION BY s.zone, s.city ORDER BY o.total_delivery_min) AS pct_rank
     FROM fact_orders o
     JOIN dim_stores s ON s.store_id = o.store_id
+    WHERE o.is_cancelled = 0
 )
 SELECT
     zone,
@@ -42,6 +48,7 @@ SELECT
     ROUND(100.0 * SUM(sla_breach) / COUNT(*), 2)     AS sla_breach_pct,
     COUNT(*)                                          AS orders
 FROM fact_orders
+WHERE is_cancelled = 0
 GROUP BY distance_bucket
 ORDER BY distance_bucket;
 
@@ -52,6 +59,7 @@ SELECT
     ROUND(100.0 * SUM(sla_breach) / COUNT(*), 2)     AS sla_breach_pct,
     COUNT(*)                                          AS orders
 FROM fact_orders
+WHERE is_cancelled = 0
 GROUP BY is_rain_day;
 
 -- ---------------------------------------------------------------------------
@@ -67,6 +75,7 @@ WITH shift_load AS (
         AVG(o.dispatch_wait_min)            AS avg_dispatch_wait_min,
         100.0 * SUM(o.sla_breach) / COUNT(*) AS sla_breach_pct
     FROM fact_orders o
+    WHERE o.is_cancelled = 0
     GROUP BY o.store_id, o.date, o.shift
 )
 SELECT
@@ -93,6 +102,6 @@ SELECT
     COUNT(*)                                          AS orders
 FROM fact_orders o
 JOIN dim_stores s ON s.store_id = o.store_id
-WHERE s.zone = 'East' AND s.city = 'Delhi'
+WHERE s.zone = 'East' AND s.city = 'Delhi' AND o.is_cancelled = 0
 GROUP BY o.hour
 ORDER BY o.hour;

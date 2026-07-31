@@ -25,8 +25,8 @@ way real operational problems hide inside real operational data.
 | Domain | Network KPI (looks fine) | Where it breaks down | Root cause |
 |---|---|---|---|
 | Supply Chain | 99.9% fill rate | 3 stores carry 98% of ₹2.75L lost sales | 3 stores mapped to a 3-day-lead-time warehouse that also under-ships quantity on ~every order |
-| Store Ops | 87.6% SLA adherence | 3 stores hit 62–70% evening breach | Evening-shift picker AND rider staffing at 50–72% / 56–68% of need, concentrated in the 7–9pm peak |
-| Last Mile | 13.6 min avg delivery | East Delhi hits 40.4% breach, 19.3 min avg | Compounding: longest structural distance + same rain exposure + the same 2 understaffed stores |
+| Store Ops | 87.9% SLA adherence | 3 stores hit 63–69% evening breach | Evening-shift picker AND rider staffing at 50–72% / 56–68% of need, concentrated in the 7–9pm peak |
+| Last Mile | 13.6 min avg delivery | East Delhi hits 39.4% breach, 19.2 min avg | Compounding: longest structural distance + same rain exposure + the same 2 understaffed stores |
 
 Full detail and SQL for each: [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md) ·
 [`analysis/store_ops_rca.md`](../analysis/store_ops_rca.md) ·
@@ -40,11 +40,11 @@ single-domain view can:
 
 | Store | Stockout % | SLA breach % | Avg delivery (min) | Risk score | Story |
 |---|---|---|---|---|---|
-| DEL-E-01 | 1.24% | 40.3% | 19.2 | **8** | Fails all three — compounding risk |
-| DEL-E-02 | 0.96% | 40.6% | 19.5 | **6** | Fails SLA + delivery outright; stockout rate sits right at the scoring threshold |
-| BLR-S-02 | 0.0% | 26.8% | 14.2 | 4 | Staffing-only — proves it's not a Delhi/warehouse issue |
-| DEL-S-02 | 1.34% | 6.0% | 13.0 | 3 | Supply-chain-only — isolates the warehouse as the driver |
-| BLR-E-01 | 0.05% | 15.7% | 15.6 | 2 | Distance-only — East-zone effect without staffing on top |
+| DEL-E-01 | 1.24% | 39.0% | 19.1 | **8** | Fails all three — compounding risk |
+| DEL-E-02 | 0.96% | 40.0% | 19.5 | **6** | Fails SLA + delivery outright; stockout rate sits right at the scoring threshold |
+| BLR-S-02 | 0.0% | 25.8% | 14.1 | 4 | Staffing-only — proves it's not a Delhi/warehouse issue |
+| DEL-S-02 | 1.34% | 6.1% | 13.0 | 3 | Supply-chain-only — isolates the warehouse as the driver |
+| BLR-E-01 | 0.05% | 15.8% | 15.6 | 2 | Distance-only — East-zone effect without staffing on top |
 | Every other store | ≤0.05% | ≤8.8% | ≤13.8 | **0** | Clean baseline |
 
 **The takeaway an APM would bring to a review:** DEL-E-01 and DEL-E-02 aren't three separate small
@@ -173,6 +173,17 @@ data in. Two additions turn it into an actual tool rather than a one-time report
   Worth including because catching your own metric definitions drifting out of sync with your own
   new fields — and fixing it rather than leaving it — is a smaller but real version of the same
   discipline as the bigger corrections above.
+- **Asked directly whether I was sure about everything, re-checking surfaced the same bug at
+  network scale.** SLA breach rate and delivery time — this project's most-cited numbers, quoted
+  in every domain write-up and the headline investigation table above — had the identical
+  cancelled-orders issue as Perfect Order Rate and Rider Utilization, just not yet checked. Fixed
+  across [`sql/03_store_ops_kpis.sql`](../sql/03_store_ops_kpis.sql),
+  [`sql/04_last_mile_kpis.sql`](../sql/04_last_mile_kpis.sql),
+  [`sql/05_cross_domain_rca.sql`](../sql/05_cross_domain_rca.sql), and the dashboard's own
+  Python-side aggregations. The shift is small (network SLA adherence 87.6% → 87.9%; East Delhi
+  breach 40.4% → 39.4%) and **no root cause, store ranking, or recommendation changes** — but
+  every already-published number in `analysis/store_ops_rca.md` and `analysis/last_mile_rca.md`
+  was re-verified and corrected rather than left approximately right.
 
 ## Using this for your application
 

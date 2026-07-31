@@ -368,6 +368,16 @@ if city_filter != "All":
 else:
     inv_f, ord_f, repl_f, staff_f, stores_f = inventory, orders, replenishment, staffing, stores
 
+# Delivery-outcome metrics (SLA breach, delivery time) only make sense for
+# orders that were actually delivered -- a cancelled order has no real SLA
+# outcome even though this model still computes a hypothetical delivery
+# time for it before the cancellation is decided. Same reasoning as the
+# Perfect Order Rate / Rider Utilization fix in sql/06_new_metrics.sql;
+# ord_f (all orders) is kept for anything that legitimately wants every
+# order, e.g. Cost-to-Serve, which counts cancelled-order labor as a real
+# cost even though no sale completed.
+ord_delivered = ord_f[ord_f["is_cancelled"] == 0].copy()
+
 st.sidebar.markdown("---")
 st.sidebar.markdown(
     "**Dataset**: 12 dark stores · 2 cities · 60 days simulated ops data\n\n"
@@ -387,8 +397,8 @@ fast_inv = inv_f[inv_f["is_fast_moving"] == 1]
 fill_rate = 100 * fast_inv["units_sold"].sum() / fast_inv["demand"].sum()
 stockout_rate = 100 * fast_inv["stockout_flag"].sum() / len(fast_inv)
 lost_sales_value = (fast_inv["lost_units"] * fast_inv["unit_cost"]).sum()
-sla_adherence = 100 * (1 - ord_f["sla_breach"].mean())
-avg_delivery = ord_f["total_delivery_min"].mean()
+sla_adherence = 100 * (1 - ord_delivered["sla_breach"].mean())
+avg_delivery = ord_delivered["total_delivery_min"].mean()
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Fill Rate (fast movers)", f"{fill_rate:.1f}%")
@@ -416,8 +426,8 @@ with tab_overview:
         .apply(lambda d: 100 * d["stockout_flag"].sum() / len(d), include_groups=False)
         .rename("stockout_rate_pct")
     )
-    so = ord_f.groupby("store_id")["sla_breach"].mean().mul(100).rename("sla_breach_pct")
-    lm = ord_f.groupby("store_id")["total_delivery_min"].mean().rename("avg_delivery_min")
+    so = ord_delivered.groupby("store_id")["sla_breach"].mean().mul(100).rename("sla_breach_pct")
+    lm = ord_delivered.groupby("store_id")["total_delivery_min"].mean().rename("avg_delivery_min")
     risk = pd.concat([sc, so, lm], axis=1).reset_index().merge(stores, on="store_id")
 
     def risk_score(row):
@@ -721,7 +731,7 @@ with tab_store_ops:
     st.subheader("SLA breach rate vs. picker staffing ratio")
     st.caption("Root cause: SLA breaches spike sharply once picker staffing drops below ~85% during peak hours.")
 
-    peak = ord_f[ord_f["is_peak_hour"] == 1].copy()
+    peak = ord_delivered[ord_delivered["is_peak_hour"] == 1].copy()
     bins = [0, 0.70, 0.85, 1.00, 999]
     labels = ["<70%", "70-85%", "85-100%", "100%+"]
     peak["staffing_bucket"] = pd.cut(peak["picker_staffing_ratio"], bins=bins, labels=labels)
@@ -744,7 +754,7 @@ with tab_store_ops:
         st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Evening-shift SLA breach by store")
-    eve = ord_f[ord_f["shift"] == "Evening"].groupby(["store_id", "chronic_understaffed"]).agg(
+    eve = ord_delivered[ord_delivered["shift"] == "Evening"].groupby(["store_id", "chronic_understaffed"]).agg(
         sla_breach_pct=("sla_breach", lambda x: 100 * x.mean())
     ).reset_index().sort_values("sla_breach_pct", ascending=False)
     fig = px.bar(eve, x="store_id", y="sla_breach_pct", color="chronic_understaffed",
@@ -803,7 +813,7 @@ with tab_store_ops:
     st.markdown(
         "**The same 3 stores are just as understaffed on riders as on pickers** (evening rider "
         "staffing ratio 56–68% vs. 89%+ everywhere else — sql/03 Q6) — and SLA breach at the most "
-        "rider-understaffed bucket (99.73%) is essentially identical to the most picker-understaffed "
+        "rider-understaffed bucket (99.74%) is essentially identical to the most picker-understaffed "
         "bucket. **The original fix recommendation only priced picker headcount.** It's corrected "
         "in Section 6 of [`analysis/store_ops_rca.md`](../analysis/store_ops_rca.md) and the "
         "Cross-Domain RCA tab's cost-of-fix section — the true fix, and its true cost, includes both."
@@ -814,7 +824,7 @@ with tab_store_ops:
 # ---------------------------------------------------------------------------
 with tab_last_mile:
     st.subheader("Delivery time & SLA breach by zone")
-    zone_view = ord_f.groupby(["zone", "city"]).agg(
+    zone_view = ord_delivered.groupby(["zone", "city"]).agg(
         avg_delivery_min=("total_delivery_min", "mean"),
         sla_breach_pct=("sla_breach", lambda x: 100 * x.mean()),
         orders=("order_id", "count"),
@@ -832,7 +842,7 @@ with tab_last_mile:
         st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Rain-day effect")
-    rain_view = ord_f.groupby("is_rain_day").agg(
+    rain_view = ord_delivered.groupby("is_rain_day").agg(
         avg_delivery_min=("total_delivery_min", "mean"),
         sla_breach_pct=("sla_breach", lambda x: 100 * x.mean()),
     ).reset_index()
@@ -846,7 +856,7 @@ with tab_last_mile:
         st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("East Delhi deep dive — hour-by-hour SLA breach")
-    east_del = ord_f[(ord_f["zone"] == "East") & (ord_f["city"] == "Delhi")]
+    east_del = ord_delivered[(ord_delivered["zone"] == "East") & (ord_delivered["city"] == "Delhi")]
     hourly = east_del.groupby("hour").agg(
         sla_breach_pct=("sla_breach", lambda x: 100 * x.mean()),
         orders=("order_id", "count"),

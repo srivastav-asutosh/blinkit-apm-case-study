@@ -5,6 +5,11 @@
 -- ---------------------------------------------------------------------------
 -- Q1. SLA adherence and pick time by store, evening shift only (this is
 --     where the chronic-understaffed stores are expected to show up)
+--     Excludes cancelled orders -- a cancelled order has no real SLA
+--     outcome even though this model still computes a hypothetical
+--     delivery time for it before the cancellation is decided (see
+--     sql/12_order_failures.sql). Consistent with the same fix applied to
+--     Perfect Order Rate / Rider Utilization in sql/06_new_metrics.sql.
 -- ---------------------------------------------------------------------------
 SELECT
     o.store_id,
@@ -15,7 +20,7 @@ SELECT
     COUNT(*)                                        AS orders
 FROM fact_orders o
 JOIN dim_stores s ON s.store_id = o.store_id
-WHERE o.shift = 'Evening'
+WHERE o.shift = 'Evening' AND o.is_cancelled = 0
 GROUP BY o.store_id, s.chronic_understaffed
 ORDER BY sla_breach_pct DESC;
 
@@ -23,6 +28,7 @@ ORDER BY sla_breach_pct DESC;
 -- Q2. Root cause: SLA breach rate by picker-staffing-ratio bucket
 --     (the core RCA query — buckets orders by how understaffed the shift
 --      was at the moment the order was picked, independent of which store)
+--     Excludes cancelled orders (see Q1 comment).
 -- ---------------------------------------------------------------------------
 SELECT
     CASE
@@ -35,7 +41,7 @@ SELECT
     ROUND(AVG(pick_time_min), 2)                     AS avg_pick_time_min,
     ROUND(100.0 * SUM(sla_breach) / COUNT(*), 2)     AS sla_breach_pct
 FROM fact_orders
-WHERE is_peak_hour = 1
+WHERE is_peak_hour = 1 AND is_cancelled = 0
 GROUP BY staffing_bucket
 ORDER BY staffing_bucket;
 
@@ -43,6 +49,7 @@ ORDER BY staffing_bucket;
 -- Q3. Peak vs. off-peak SLA breach, split by chronic-understaffed flag
 --     (shows the problem is peak-hours-specific, not an all-day issue —
 --      i.e. it's a staffing/scheduling problem, not a store capability one)
+--     Excludes cancelled orders (see Q1 comment).
 -- ---------------------------------------------------------------------------
 SELECT
     s.chronic_understaffed,
@@ -51,6 +58,7 @@ SELECT
     COUNT(*)                                        AS orders
 FROM fact_orders o
 JOIN dim_stores s ON s.store_id = o.store_id
+WHERE o.is_cancelled = 0
 GROUP BY s.chronic_understaffed, o.is_peak_hour
 ORDER BY s.chronic_understaffed DESC, o.is_peak_hour DESC;
 
@@ -72,7 +80,10 @@ ORDER BY avg_staffing_ratio ASC;
 -- ---------------------------------------------------------------------------
 -- Q5. Order funnel breakdown (pick / pack / dispatch / travel) for the three
 --     worst SLA-breach stores vs. the fleet average — isolates which stage
---     of the funnel is actually driving the gap
+--     of the funnel is actually driving the gap. Excludes cancelled orders
+--     (see Q1 comment) -- this is a delivery-outcome diagnostic, not a
+--     labor-cost accounting (contrast sql/06_new_metrics.sql M4, which
+--     deliberately keeps cancelled orders in).
 -- ---------------------------------------------------------------------------
 SELECT
     CASE WHEN store_id IN ('DEL-E-01', 'DEL-E-02', 'BLR-S-02') THEN 'Worst 3 stores' ELSE 'Fleet average' END AS store_group,
@@ -82,6 +93,7 @@ SELECT
     ROUND(AVG(travel_time_min), 2)     AS avg_travel_min,
     ROUND(AVG(total_delivery_min), 2)  AS avg_total_min
 FROM fact_orders
+WHERE is_cancelled = 0
 GROUP BY store_group;
 
 -- ---------------------------------------------------------------------------
@@ -106,6 +118,7 @@ ORDER BY avg_rider_staffing_ratio ASC;
 -- Q7. Dispatch wait & SLA breach by rider-staffing bucket, peak hours —
 --     the exact mirror of Q2, confirming dispatch wait is just as
 --     staffing-sensitive as pick time, via a *different* headcount lever.
+--     Excludes cancelled orders (see Q1 comment).
 -- ---------------------------------------------------------------------------
 SELECT
     CASE
@@ -119,6 +132,6 @@ SELECT
     ROUND(100.0 * SUM(o.sla_breach) / COUNT(*), 2)   AS sla_breach_pct
 FROM fact_orders o
 JOIN fact_staffing_daily s ON s.store_id = o.store_id AND s.date = o.date AND s.shift = o.shift
-WHERE o.is_peak_hour = 1
+WHERE o.is_peak_hour = 1 AND o.is_cancelled = 0
 GROUP BY rider_staffing_bucket
 ORDER BY rider_staffing_bucket;

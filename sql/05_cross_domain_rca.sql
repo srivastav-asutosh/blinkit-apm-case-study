@@ -14,19 +14,24 @@ WITH supply_chain AS (
     GROUP BY i.store_id
 ),
 store_ops AS (
+    -- Excludes cancelled orders -- a cancelled order has no real SLA
+    -- outcome (see sql/03_store_ops_kpis.sql Q1 comment).
     SELECT
         store_id,
         ROUND(AVG(picker_staffing_ratio), 2)            AS avg_picker_staffing_ratio,
         ROUND(100.0 * SUM(sla_breach) / COUNT(*), 2)     AS overall_sla_breach_pct
     FROM fact_orders
+    WHERE is_cancelled = 0
     GROUP BY store_id
 ),
 last_mile AS (
+    -- Excludes cancelled orders (see store_ops CTE comment above).
     SELECT
         store_id,
         ROUND(AVG(total_delivery_min), 2)  AS avg_delivery_min,
         ROUND(AVG(distance_km), 2)          AS avg_distance_km
     FROM fact_orders
+    WHERE is_cancelled = 0
     GROUP BY store_id
 )
 SELECT
