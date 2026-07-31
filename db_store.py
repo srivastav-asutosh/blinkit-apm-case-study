@@ -19,6 +19,26 @@ import pandas as pd
 import requests
 
 
+def _apply_parse_dates(df, parse_dates):
+    """
+    Parses date columns with format='mixed' rather than pandas' default
+    single-format inference. Bulk-generated rows store dates as
+    "YYYY-MM-DD HH:MM:SS" (pandas Timestamps stringify with a time
+    component), but a value typed or uploaded through the Admin panel is
+    just "YYYY-MM-DD" -- a column mixing both breaks plain to_datetime()
+    (ValueError) and pandas.read_sql's own parse_dates= is worse: it doesn't
+    error, it silently turns the mismatched rows into NaT. Caught live after
+    the first real Admin-panel upload landed a plain date next to bulk rows
+    with a time component.
+    """
+    if not parse_dates:
+        return df
+    for c in parse_dates:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], format="mixed")
+    return df
+
+
 class SqliteStore:
     """Backed by a local SQLite file. Used when no Turso credentials are configured."""
 
@@ -28,9 +48,10 @@ class SqliteStore:
     def read_sql(self, sql, params=None, parse_dates=None):
         conn = sqlite3.connect(self.db_path)
         try:
-            return pd.read_sql(sql, conn, params=params, parse_dates=parse_dates)
+            df = pd.read_sql(sql, conn, params=params)
         finally:
             conn.close()
+        return _apply_parse_dates(df, parse_dates)
 
     def execute(self, sql, params=None):
         conn = sqlite3.connect(self.db_path)
@@ -161,11 +182,7 @@ class TursoStore:
         cols = [c["name"] for c in result["cols"]]
         rows = [[self._decode(cell) for cell in row] for row in result["rows"]]
         df = pd.DataFrame(rows, columns=cols)
-        if parse_dates:
-            for c in parse_dates:
-                if c in df.columns:
-                    df[c] = pd.to_datetime(df[c])
-        return df
+        return _apply_parse_dates(df, parse_dates)
 
     def write_df(self, table, df, mode="append", rows_per_stmt=1000, stmts_per_call=5):
         """
