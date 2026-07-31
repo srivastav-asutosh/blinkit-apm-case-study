@@ -1101,9 +1101,11 @@ with tab_metrics:
     with c1:
         st.markdown("##### Perfect Order Rate, by store")
         st.caption(
-            "Proxy metric: order wasn't SLA-breached AND its store had zero fast-moving stockouts "
-            "that day. Not a strict line-item fulfillment rate (this schema doesn't link orders to "
-            "specific SKUs) — a transparent, honestly-labeled composite instead."
+            "Proxy metric: order wasn't SLA-breached, its store had zero fast-moving stockouts that "
+            "day, and it wasn't cancelled or returned. Not a strict line-item fulfillment rate (this "
+            "schema doesn't link orders to specific SKUs) — a transparent, honestly-labeled composite "
+            "instead. (Corrected to exclude cancellations/returns after sql/12_order_failures.sql "
+            "introduced those fields — this query had missed them.)"
         )
         fig = px.bar(
             perfect_order.sort_values("perfect_order_rate_pct"),
@@ -1132,8 +1134,8 @@ with tab_metrics:
     with c3:
         st.markdown("##### Rider Utilization, by store")
         st.caption(
-            "Orders delivered per scheduled rider-hour (6h/shift assumed). Notice the understaffed "
-            "stores run the *highest* utilization — their riders are overworked, not idle."
+            "Delivered (non-cancelled) orders per scheduled rider-hour (6h/shift assumed). Notice the "
+            "understaffed stores run the *highest* utilization — their riders are overworked, not idle."
         )
         fig = px.bar(
             rider_util.sort_values("orders_per_rider_hour", ascending=False),

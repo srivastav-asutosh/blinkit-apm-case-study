@@ -163,6 +163,16 @@ data in. Two additions turn it into an actual tool rather than a one-time report
   reallocation itself was reframed from a book-value number into an annualized carrying-cost
   impact (**~₹4.21L/year net saving**), because that's the number that actually gets a
   working-capital change funded, not the balance-sheet figure.
+- **A fourth pass caught two of this project's own metrics going stale relative to its own new
+  work.** Perfect Order Rate and Rider Utilization (SQL:
+  [`sql/06_new_metrics.sql`](../sql/06_new_metrics.sql) M1/M3) predated the order-failure fields
+  added above and had never been updated to exclude cancelled/returned orders — 3.8% of orders
+  this project's own dashboard was calling "perfect" had actually been cancelled or returned
+  (network Perfect Order Rate overstated 79.72% vs. a corrected 76.70%; Rider Utilization
+  overstated ~2–3%). Fixed with a two-line filter change, no schema or data regeneration required.
+  Worth including because catching your own metric definitions drifting out of sync with your own
+  new fields — and fixing it rather than leaving it — is a smaller but real version of the same
+  discipline as the bigger corrections above.
 
 ## Using this for your application
 

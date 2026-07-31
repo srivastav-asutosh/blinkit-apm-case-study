@@ -12,9 +12,16 @@
 --     Textbook "perfect order" = on-time + complete + damage-free. This
 --     schema tracks orders and inventory as separate fact tables (no
 --     order-line-item link), so this is a store-day-level proxy: an order
---     counts as "perfect" if it didn't breach SLA AND its store had zero
---     fast-moving-SKU stockouts that same day. Documented as a proxy, not
---     claimed as a strict line-item fulfillment rate.
+--     counts as "perfect" if it didn't breach SLA, its store had zero
+--     fast-moving-SKU stockouts that same day, AND it wasn't cancelled or
+--     returned. Documented as a proxy, not claimed as a strict line-item
+--     fulfillment rate.
+--     The is_cancelled/is_returned check was added after sql/12_order_failures.sql
+--     introduced those fields -- this query predated them and, until fixed,
+--     was counting cancelled/returned orders as "perfect" whenever they
+--     happened to also avoid an SLA breach and a same-day stockout (3.8% of
+--     orders this query called perfect had actually been cancelled or
+--     returned; network rate was overstated 79.72% vs. a corrected 76.70%).
 -- ---------------------------------------------------------------------------
 WITH store_day_stockout AS (
     SELECT
@@ -30,6 +37,7 @@ SELECT
     o.store_id,
     COUNT(*)                                                                            AS orders,
     ROUND(100.0 * SUM(CASE WHEN o.sla_breach = 0 AND COALESCE(sd.any_stockout, 0) = 0
+                            AND o.is_cancelled = 0 AND o.is_returned = 0
                             THEN 1 ELSE 0 END) / COUNT(*), 2)                            AS perfect_order_rate_pct
 FROM fact_orders o
 LEFT JOIN store_day_stockout sd ON sd.store_id = o.store_id AND sd.date = o.date
@@ -68,15 +76,24 @@ ORDER BY days_of_cover ASC;
 -- M3. Rider Utilization -- orders delivered per scheduled rider-hour
 --     Shift length isn't stored explicitly; assumed 6 hours/shift (24h / 4
 --     shifts), applied consistently across stores so it's fair to compare.
+--     Counts only non-cancelled orders in the numerator -- a cancelled order
+--     was never delivered, so it shouldn't count toward "delivered per
+--     rider-hour" even though this schema still models a picker/dispatch
+--     effort having been spent on it (see sql/11_contribution_margin.sql).
+--     Returned orders ARE counted here (they were delivered, just sent
+--     back afterward) -- this fix predates and is distinct from the
+--     Perfect Order Rate fix above.
 -- ---------------------------------------------------------------------------
 WITH shift_orders AS (
-    SELECT store_id, date, shift, COUNT(*) AS orders, AVG(riders_on_shift) AS riders_on_shift
+    SELECT store_id, date, shift,
+        SUM(CASE WHEN is_cancelled = 0 THEN 1 ELSE 0 END) AS delivered_orders,
+        AVG(riders_on_shift) AS riders_on_shift
     FROM fact_orders
     GROUP BY store_id, date, shift
 )
 SELECT
     store_id,
-    ROUND(SUM(orders) * 1.0 / NULLIF(SUM(riders_on_shift * 6.0), 0), 2) AS orders_per_rider_hour
+    ROUND(SUM(delivered_orders) * 1.0 / NULLIF(SUM(riders_on_shift * 6.0), 0), 2) AS orders_per_rider_hour
 FROM shift_orders
 GROUP BY store_id
 ORDER BY orders_per_rider_hour DESC;
