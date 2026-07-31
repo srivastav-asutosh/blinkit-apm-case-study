@@ -31,6 +31,14 @@ RNG = np.random.default_rng(42)
 # already consumed elsewhere in the inventory loop -- same reasoning as the
 # RNG reseed before orders generation below.
 FILL_RNG = np.random.default_rng(44)
+# Dedicated stream for order-failure (cancellation/return) draws -- kept
+# separate from the orders RNG stream so adding this mechanism doesn't shift
+# any existing order's pick/dispatch/travel time draws.
+RETURNS_RNG = np.random.default_rng(46)
+
+# Retail margin used to derive dim_skus.selling_price_inr from unit_cost --
+# a plausible blended Indian quick-commerce margin, not a sourced figure.
+DEFAULT_MARGIN_PCT = 0.22
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -121,6 +129,7 @@ sku_rows = []
 sku_counter = 1
 for cat, meta in CATEGORIES.items():
     for i in range(meta["n"]):
+        unit_cost = round(RNG.uniform(15, 450), 2)
         sku_rows.append(
             {
                 "sku_id": f"SKU-{sku_counter:04d}",
@@ -128,7 +137,8 @@ for cat, meta in CATEGORIES.items():
                 "category": cat,
                 "is_fast_moving": meta["fast_moving"],
                 "shelf_life_days": meta["shelf_life"],
-                "unit_cost": round(RNG.uniform(15, 450), 2),
+                "unit_cost": unit_cost,
+                "selling_price_inr": round(unit_cost * (1 + DEFAULT_MARGIN_PCT), 2),
                 "avg_daily_demand_per_store": round(
                     RNG.uniform(8, 22) if meta["fast_moving"] else RNG.uniform(1.5, 6), 2
                 ),
@@ -136,6 +146,29 @@ for cat, meta in CATEGORIES.items():
         )
         sku_counter += 1
 skus = pd.DataFrame(sku_rows)
+
+# Demand-weighted average selling price across the catalog -- deterministic
+# (no RNG draw), used later to ground order_value in real SKU economics
+# instead of an arbitrary flat range. fact_orders has no sku_id link (orders
+# are item_count-level, not line-item-level), so this is the network-wide
+# blended price rather than a true per-order product mix -- a documented
+# simplification, not a claim of line-item accuracy.
+#
+# BASKET_PRICE_FACTOR: the catalog-wide blended price (~Rs280/unit) includes
+# lower-frequency, higher-value categories (Personal/Household/Baby Care)
+# that a typical quick-commerce basket touches rarely relative to daily
+# essentials. Weighting by average_daily_demand already tilts toward
+# fast-movers, but even the fast-mover-only blended price is ~Rs287 --
+# implausibly high for a single item in a 10-minute-delivery basket
+# (real quick-commerce AOV runs roughly Rs200-500 for a multi-item order,
+# not per item). Scaled down explicitly, with the reasoning stated here,
+# rather than silently accepted -- the same discipline applied earlier to
+# the shrinkage rate calibration.
+BASKET_PRICE_FACTOR = 0.35
+NETWORK_AVG_SELLING_PRICE = BASKET_PRICE_FACTOR * float(
+    (skus["selling_price_inr"] * skus["avg_daily_demand_per_store"]).sum()
+    / skus["avg_daily_demand_per_store"].sum()
+)
 
 # ---------------------------------------------------------------------------
 # Dimension: riders
@@ -397,6 +430,43 @@ for _, s in stores.iterrows():
             promised_minutes = min(28, max(13, round(12 + distance_km * 1.8)))
             sla_breach = total_delivery_min > promised_minutes
 
+            # order_value: grounded in real SKU economics (NETWORK_AVG_SELLING_PRICE,
+            # derived from unit_cost + DEFAULT_MARGIN_PCT) instead of an arbitrary
+            # flat range. Same single RNG.uniform() call, same position in the
+            # stream as the line this replaces -- deliberately, so every other
+            # order's pick/dispatch/travel-time draws stay bit-for-bit identical.
+            order_value = round(item_count * NETWORK_AVG_SELLING_PRICE * RNG.uniform(0.75, 1.25), 2)
+
+            # Order-failure lifecycle: cancellations (pre-fulfillment) and
+            # returns/refunds (post-delivery). Drawn from RETURNS_RNG, a stream
+            # dedicated to this mechanism, so adding it doesn't perturb any
+            # existing order's fields drawn from the main RNG stream above.
+            # Cancellation risk is elevated under severe peak-hour understaffing
+            # (an order that can't realistically be fulfilled in time sometimes
+            # gets cancelled rather than delivered extremely late); return risk
+            # is elevated by SLA breach (late) and rain (transit damage) --
+            # tying this new mechanism back to root causes already in the model
+            # rather than treating it as an unrelated random layer.
+            cancel_prob = 0.08 if (picker_ratio < 0.7 and is_peak) else 0.015
+            is_cancelled = bool(RETURNS_RNG.uniform() < cancel_prob)
+
+            is_returned = False
+            return_reason = None
+            refund_amount = 0.0
+            if not is_cancelled:
+                return_prob = 0.02 + (0.05 if sla_breach else 0.0) + (0.03 if is_rain else 0.0)
+                if RETURNS_RNG.uniform() < return_prob:
+                    is_returned = True
+                    refund_amount = order_value
+                    if sla_breach and RETURNS_RNG.uniform() < 0.6:
+                        return_reason = "Late delivery"
+                    elif is_rain and RETURNS_RNG.uniform() < 0.5:
+                        return_reason = "Item damaged in transit"
+                    else:
+                        return_reason = str(RETURNS_RNG.choice(
+                            ["Customer refused", "Wrong item", "Quality issue"]
+                        ))
+
             order_rows.append(
                 {
                     "order_id": f"ORD-{order_counter:07d}",
@@ -408,7 +478,7 @@ for _, s in stores.iterrows():
                     "is_peak_hour": bool(is_peak),
                     "is_rain_day": bool(is_rain),
                     "item_count": item_count,
-                    "order_value": round(item_count * RNG.uniform(45, 140), 2),
+                    "order_value": order_value,
                     "distance_km": round(distance_km, 2),
                     "picker_staffing_ratio": picker_ratio,
                     "riders_on_shift": int(riders_on_shift),
@@ -419,6 +489,10 @@ for _, s in stores.iterrows():
                     "total_delivery_min": round(total_delivery_min, 2),
                     "promised_minutes": promised_minutes,
                     "sla_breach": bool(sla_breach),
+                    "is_cancelled": is_cancelled,
+                    "is_returned": is_returned,
+                    "return_reason": return_reason,
+                    "refund_amount_inr": round(refund_amount, 2),
                 }
             )
             order_counter += 1
@@ -444,6 +518,7 @@ business_assumptions = pd.DataFrame(
             "ev_scooter_cost_per_km_inr": 1.5,
             "petrol_scooter_cost_per_km_inr": 4.2,
             "bicycle_cost_per_km_inr": 0.3,
+            "annual_carrying_cost_pct": 20.0,
             "updated_by": "system_default",
             "updated_at": pd.Timestamp.utcnow().tz_localize(None),
         }

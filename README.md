@@ -56,6 +56,9 @@ sql/07_safety_stock_policy.sql  Variability-adjusted safety-stock formula vs. cu
 sql/08_fix_roi.sql            Cost/payback of the two headline fixes -- staffing gap and warehouse remap
 sql/09_case_fill_rate.sql     Warehouse case-fill rate -- a second reliability dimension beyond lead time
 sql/10_fleet_cost_efficiency.sql  Fleet running cost by vehicle type (EV/petrol/bicycle) and store
+sql/11_contribution_margin.sql  Revenue x Cost-to-Serve -- net contribution margin per order, by store
+sql/12_order_failures.sql     Cancellation/return/refund RCA -- tied to understaffing, SLA breach, rain
+sql/13_abc_xyz_segmentation.sql  True value x variability SKU segmentation vs. the binary Z-factor policy
 dashboard/app.py              Streamlit + Plotly dashboard (7 tabs, incl. Admin)
 analysis/*.md                 Per-domain RCA write-ups (problem → investigation → root cause →
                                recommendation → projected impact)

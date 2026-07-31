@@ -28,6 +28,9 @@ FIX_ROI_SQL = ROOT / "sql" / "08_fix_roi.sql"
 CASE_FILL_SQL = ROOT / "sql" / "09_case_fill_rate.sql"
 FLEET_COST_SQL = ROOT / "sql" / "10_fleet_cost_efficiency.sql"
 STORE_OPS_SQL = ROOT / "sql" / "03_store_ops_kpis.sql"
+CONTRIBUTION_MARGIN_SQL = ROOT / "sql" / "11_contribution_margin.sql"
+ORDER_FAILURES_SQL = ROOT / "sql" / "12_order_failures.sql"
+ABC_XYZ_SQL = ROOT / "sql" / "13_abc_xyz_segmentation.sql"
 
 
 def get_secret(key):
@@ -67,7 +70,7 @@ UPLOADABLE_TABLES = {
     },
     "dim_skus": {
         "columns": ["sku_id", "sku_name", "category", "is_fast_moving",
-                    "shelf_life_days", "unit_cost", "avg_daily_demand_per_store"],
+                    "shelf_life_days", "unit_cost", "selling_price_inr", "avg_daily_demand_per_store"],
         "default_mode": "replace",
         "bool_cols": ["is_fast_moving"],
     },
@@ -95,9 +98,10 @@ UPLOADABLE_TABLES = {
                     "is_peak_hour", "is_rain_day", "item_count", "order_value", "distance_km",
                     "picker_staffing_ratio", "riders_on_shift", "pick_time_min", "pack_time_min",
                     "dispatch_wait_min", "travel_time_min", "total_delivery_min",
-                    "promised_minutes", "sla_breach"],
+                    "promised_minutes", "sla_breach", "is_cancelled", "is_returned",
+                    "return_reason", "refund_amount_inr"],
         "default_mode": "append",
-        "bool_cols": ["is_peak_hour", "is_rain_day", "sla_breach"],
+        "bool_cols": ["is_peak_hour", "is_rain_day", "sla_breach", "is_cancelled", "is_returned"],
     },
 }
 
@@ -207,8 +211,12 @@ def load_new_metrics():
 @st.cache_data
 def load_safety_stock_policy():
     sql = SAFETY_STOCK_SQL.read_text(encoding="utf-8")
-    stmt = "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).strip().rstrip(";")
-    return store.read_sql(stmt)
+    stmts = [
+        s.strip() for s in
+        "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).split(";")
+        if s.strip()
+    ]
+    return [store.read_sql(stmt) for stmt in stmts]  # [rop_gap, carrying_cost]
 
 
 @st.cache_data
@@ -249,6 +257,39 @@ def load_rider_staffing():
         if s.strip()
     ]
     return [store.read_sql(stmt) for stmt in stmts]  # [Q1..Q7] -- Q6, Q7 (idx 5, 6) are the rider views
+
+
+@st.cache_data
+def load_contribution_margin():
+    sql = CONTRIBUTION_MARGIN_SQL.read_text(encoding="utf-8")
+    stmts = [
+        s.strip() for s in
+        "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).split(";")
+        if s.strip()
+    ]
+    return [store.read_sql(stmt) for stmt in stmts]  # [implied_margin, per_store_margin]
+
+
+@st.cache_data
+def load_order_failures():
+    sql = ORDER_FAILURES_SQL.read_text(encoding="utf-8")
+    stmts = [
+        s.strip() for s in
+        "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).split(";")
+        if s.strip()
+    ]
+    return [store.read_sql(stmt) for stmt in stmts]  # [cancel_by_staffing, return_by_sla_rain, return_reasons, by_store]
+
+
+@st.cache_data
+def load_abc_xyz():
+    sql = ABC_XYZ_SQL.read_text(encoding="utf-8")
+    stmts = [
+        s.strip() for s in
+        "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--")).split(";")
+        if s.strip()
+    ]
+    return [store.read_sql(stmt) for stmt in stmts]  # [matrix, mismatch_summary]
 
 
 def log_admin_action(action, target_table=None, rows_affected=None, note=None):
@@ -473,7 +514,7 @@ with tab_supply:
         "the root cause found above -- it's a second, independent finding: the *policy itself* "
         "doesn't scale with variability. SQL: sql/07_safety_stock_policy.sql."
     )
-    ss = load_safety_stock_policy()
+    ss, carrying_cost = load_safety_stock_policy()
     ss_view = ss.copy()
     ss_view["direction"] = ss_view["gap_pct"].apply(lambda v: "Under-buffered" if v > 0 else "Over-buffered")
 
@@ -512,6 +553,33 @@ with tab_supply:
         f"not a spend-more finding. The current policy over-buffers the two low-variability primary "
         f"warehouses and under-buffers the one volatile secondary warehouse, because it only accounts "
         f"for lead-time *length*, never lead-time or demand *variability*."
+    )
+
+    st.caption(
+        "The gap above is stated in book value. Converted to an annual carrying-cost impact "
+        "(cost of capital + warehousing + obsolescence risk — editable in the Admin panel), it's "
+        "the number that actually gets a working-capital change funded."
+    )
+    cc_view = carrying_cost.copy()
+    fig = px.bar(
+        cc_view, x="warehouse_id", y="annual_carrying_cost_impact_inr", color="direction",
+        color_discrete_map={
+            "Over-buffered (carrying-cost saving if fixed)": "#1c5cab",
+            "Under-buffered (carrying-cost added if fixed)": "#d03b3b",
+        },
+        title="Annualized carrying-cost impact by warehouse",
+        labels={"annual_carrying_cost_impact_inr": "Annual carrying-cost impact (₹)", "warehouse_id": "Warehouse"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    saving = cc_view.loc[cc_view["gap_value_inr"] < 0, "annual_carrying_cost_impact_inr"].sum()
+    added = cc_view.loc[cc_view["gap_value_inr"] > 0, "annual_carrying_cost_impact_inr"].sum()
+    net_annual = saving - added
+    st.markdown(
+        f"**The over-buffered warehouses cost ~₹{saving:,.0f}/year in carrying cost that fixing the "
+        f"policy would save; bringing WH-DEL-SECONDARY up to its correct level adds back "
+        f"~₹{added:,.0f}/year — a net annual saving of ~₹{net_annual:,.0f}.** That net number, not "
+        f"the ₹{abs(net_gap):,.0f} book-value figure above, is what an S&OP or finance review would "
+        f"actually put in a budget request."
     )
 
     st.markdown("---")
@@ -607,6 +675,43 @@ with tab_supply:
         f"independent driver behind the same warehouse's stockout numbers (sql/02_supply_chain_kpis.sql "
         f"Q2) — not just slower, also less reliable on quantity. A remap or a warehouse-side "
         f"inventory-accuracy fix addresses both at once; a lead-time fix alone would not."
+    )
+
+    st.markdown("---")
+    st.subheader("True ABC/XYZ segmentation vs. the current binary policy")
+    st.caption(
+        "The safety-stock Z-factor (1.96 / 1.28) is only ever split by the is_fast_moving flag -- a "
+        "comment in that SQL file called it \"same as real ABC/XYZ,\" but it isn't one. Real ABC/XYZ "
+        "crosses VALUE (revenue contribution) with VARIABILITY (demand volatility) independently. "
+        "SQL: sql/13_abc_xyz_segmentation.sql."
+    )
+    abc_matrix, abc_mismatch = load_abc_xyz()
+
+    pivot = abc_matrix.pivot_table(
+        index="value_class", columns="variability_class", values="segment_revenue_inr", aggfunc="sum"
+    ).reindex(index=["A", "B", "C"], columns=["Z", "Y", "X"])
+    fig = go.Figure(data=go.Heatmap(
+        z=pivot.values, x=["Z (most volatile)", "Y", "X (most stable)"], y=["A (highest value)", "B", "C (lowest value)"],
+        colorscale="Blues", text=pivot.round(0).values, texttemplate="₹%{text:,.0f}",
+    ))
+    fig.update_layout(title="Revenue by value x variability segment", height=380)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(
+        abc_mismatch.rename(columns={
+            "classification": "Classification", "n_skus": "SKUs", "revenue_inr": "Revenue (₹)",
+        }),
+        use_container_width=True, hide_index=True,
+    )
+    under = abc_mismatch.loc[abc_mismatch["classification"].str.startswith("Under"), "n_skus"].sum()
+    over = abc_mismatch.loc[abc_mismatch["classification"].str.startswith("Over"), "n_skus"].sum()
+    st.markdown(
+        f"**{under} SKU(s) are mid/high-value with high demand volatility but flagged slow-moving** — "
+        f"under-protected at Z=1.28 when their true variability calls for Z=1.96. **{over} SKU(s) are "
+        f"low-value but flagged fast-moving** — over-protected at Z=1.96 they don't need given how "
+        f"little revenue they contribute. A modest refinement compared to the safety-stock warehouse "
+        f"finding above, but the same shape of correction: a binary label standing in for a real "
+        f"segmentation."
     )
 
 # ---------------------------------------------------------------------------
@@ -926,14 +1031,62 @@ with tab_rca:
         f"and fast, across the entire range of reasonable cost assumptions."
     )
 
+    st.markdown("---")
+    st.subheader("Order-failure lifecycle: cancellations, returns, refunds")
+    st.caption(
+        "Every finding above is a service or efficiency story. This is the first one that shows the "
+        "same root causes losing revenue outright, not just cost or SLA%. Modeled causally: "
+        "cancellations tied to severe peak-hour understaffing, returns tied to SLA breach and rain. "
+        "SQL: sql/12_order_failures.sql."
+    )
+    cancel_by_staffing, return_by_sla_rain, return_reasons, failures_by_store = load_order_failures()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(
+            cancel_by_staffing, x="condition", y="cancellation_rate_pct",
+            title="Cancellation rate: severe understaffing + peak vs. everywhere else",
+            labels={"condition": "", "cancellation_rate_pct": "Cancellation rate (%)"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig = px.bar(
+            failures_by_store.sort_values("failure_rate_pct", ascending=False),
+            x="store_id", y="failure_rate_pct",
+            title="Order-failure rate (cancelled + returned) by store",
+            labels={"store_id": "Store", "failure_rate_pct": "Failure rate (%)"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    total_cancelled_value = failures_by_store["cancelled_value_inr"].sum()
+    total_refund_value = failures_by_store["refund_value_inr"].sum()
+    top3_failure = failures_by_store.sort_values("failure_rate_pct", ascending=False).head(3)
+    st.markdown(
+        f"**₹{total_cancelled_value:,.0f} in cancelled order value plus ₹{total_refund_value:,.0f} in "
+        f"refunds — ~₹{total_cancelled_value + total_refund_value:,.0f} over 60 days — and the top 3 "
+        f"stores by failure rate are {', '.join(top3_failure['store_id'])}: the exact same 3 "
+        f"chronic-understaffed stores flagged everywhere else in this case study.** This isn't a new "
+        f"root cause — it's the same one, showing up as lost revenue instead of a service metric. "
+        f"The evening-staffing fix (Section 6 of `analysis/store_ops_rca.md`) would be expected to "
+        f"reduce this alongside SLA breach, since both share the same peak-hour understaffing driver."
+    )
+
+    with st.expander("Return reasons, network-wide"):
+        st.dataframe(
+            return_reasons.rename(columns={
+                "return_reason": "Reason", "orders": "Orders", "refund_value_inr": "Refund value (₹)",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
 # ---------------------------------------------------------------------------
 # New Metrics tab
 # ---------------------------------------------------------------------------
 with tab_metrics:
     st.subheader("Beyond the original KPI set")
     st.caption(
-        "Four metrics proposed on top of the base dashboard — each ties two domains together or "
-        "converts ops performance into a ₹ figure. SQL: sql/06_new_metrics.sql."
+        "Metrics proposed on top of the base dashboard — each ties two domains together or "
+        "converts ops performance into a ₹ figure. First four: SQL: sql/06_new_metrics.sql."
     )
 
     perfect_order, days_of_cover, rider_util, cost_to_serve = load_new_metrics()
@@ -1004,6 +1157,62 @@ with tab_metrics:
         fig.update_layout(height=360)
         st.plotly_chart(fig, use_container_width=True)
 
+    st.markdown("---")
+    st.subheader("Contribution margin per store — the metric none of the above ever connected to")
+    st.caption(
+        "order_value (revenue) and Cost-to-Serve (cost) have sat in the same fact_orders table since "
+        "this project's first version and had never been joined. Fixed this round: order_value now "
+        "derives from real dim_skus economics (unit_cost + margin), not an arbitrary flat range. "
+        "SQL: sql/11_contribution_margin.sql."
+    )
+    implied_margin, per_store_margin = load_contribution_margin()
+    margin_pct = implied_margin.iloc[0]["implied_margin_pct"]
+
+    c5, c6 = st.columns(2)
+    with c5:
+        fig = px.bar(
+            per_store_margin.sort_values("net_contribution_per_order_inr"),
+            x="store_id", y="net_contribution_per_order_inr",
+            color="net_contribution_per_order_inr", color_continuous_scale="RdYlGn",
+            title="Net contribution per order, by store",
+            labels={"net_contribution_per_order_inr": "Net contribution / order (₹)", "store_id": "Store"},
+        )
+        fig.update_layout(coloraxis_showscale=False, height=380)
+        st.plotly_chart(fig, use_container_width=True)
+    with c6:
+        st.dataframe(
+            per_store_margin[["store_id", "total_orders", "net_revenue_inr", "gross_margin_inr",
+                               "cost_to_serve_total_inr", "net_contribution_inr", "net_contribution_per_order_inr"]]
+            .rename(columns={
+                "store_id": "Store", "total_orders": "Orders", "net_revenue_inr": "Net revenue (₹)",
+                "gross_margin_inr": "Gross margin (₹)", "cost_to_serve_total_inr": "Cost-to-serve (₹)",
+                "net_contribution_inr": "Net contribution (₹)",
+                "net_contribution_per_order_inr": "Net contribution/order (₹)",
+            }),
+            use_container_width=True, hide_index=True, height=380,
+        )
+
+    worst2 = per_store_margin.sort_values("net_contribution_per_order_inr").head(2)
+    best = per_store_margin.sort_values("net_contribution_per_order_inr", ascending=False).iloc[0]
+    st.markdown(
+        f"**Implied catalog margin: {margin_pct:.0%}.** Every store is net-contribution-positive — "
+        f"the operational problems in this case study aren't sinking any single store to a loss. But "
+        f"**{worst2.iloc[0]['store_id']} and {worst2.iloc[1]['store_id']} — the same two highest "
+        f"cross-domain risk stores in the network — post the lowest net contribution per order "
+        f"(₹{worst2.iloc[0]['net_contribution_per_order_inr']:.0f} and "
+        f"₹{worst2.iloc[1]['net_contribution_per_order_inr']:.0f}) vs. the network's healthiest store, "
+        f"{best['store_id']} at ₹{best['net_contribution_per_order_inr']:.0f}** — a ~"
+        f"{100*(best['net_contribution_per_order_inr']/worst2.iloc[0]['net_contribution_per_order_inr']-1):.0f}% "
+        f"gap driven almost entirely by elevated cost-to-serve, not lower revenue. This is the number "
+        f"that closes the loop on every other finding in this case study: the operational problems "
+        f"aren't just service issues, they're a measurable margin gap at the exact same two stores."
+    )
+    st.caption(
+        "Caveat: net_revenue and implied COGS are derived from a network-wide blended selling price "
+        "(fact_orders has no line-item SKU link), not true per-order product mix — directionally "
+        "sound, not claimed as line-item-accurate."
+    )
+
 # ---------------------------------------------------------------------------
 # Admin tab
 # ---------------------------------------------------------------------------
@@ -1068,17 +1277,23 @@ with tab_admin:
                 bicycle_cost = ac5.number_input(
                     "Bicycle (₹/km)", min_value=0.0, value=float(wage["bicycle_cost_per_km_inr"]), step=0.1
                 )
+                carrying_cost_pct = st.number_input(
+                    "Annual inventory carrying cost (%)", min_value=0.0, max_value=100.0,
+                    value=float(wage["annual_carrying_cost_pct"]), step=1.0,
+                    help="Cost of capital + warehousing + obsolescence risk, as an annual % of inventory value held.",
+                )
                 if st.form_submit_button("Save assumptions"):
                     store.execute(
                         "UPDATE business_assumptions SET picker_hourly_wage_inr=?, rider_hourly_wage_inr=?, "
                         "ev_scooter_cost_per_km_inr=?, petrol_scooter_cost_per_km_inr=?, bicycle_cost_per_km_inr=?, "
-                        "updated_by=?, updated_at=? WHERE id=1",
-                        [picker_wage, rider_wage, ev_cost, petrol_cost, bicycle_cost,
+                        "annual_carrying_cost_pct=?, updated_by=?, updated_at=? WHERE id=1",
+                        [picker_wage, rider_wage, ev_cost, petrol_cost, bicycle_cost, carrying_cost_pct,
                          "admin_panel", datetime.now(timezone.utc).isoformat(timespec="seconds")],
                     )
                     log_admin_action("update_assumptions", "business_assumptions",
                                       1, f"picker=₹{picker_wage}/hr, rider=₹{rider_wage}/hr, "
-                                      f"ev=₹{ev_cost}/km, petrol=₹{petrol_cost}/km, bicycle=₹{bicycle_cost}/km")
+                                      f"ev=₹{ev_cost}/km, petrol=₹{petrol_cost}/km, bicycle=₹{bicycle_cost}/km, "
+                                      f"carrying_cost={carrying_cost_pct}%")
                     refresh_after_write()
                     st.success("Saved. Cost-to-Serve and fleet-cost metrics will recompute with the new assumptions.")
                     st.rerun()

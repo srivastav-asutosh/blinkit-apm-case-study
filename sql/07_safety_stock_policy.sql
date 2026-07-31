@@ -102,3 +102,52 @@ FROM comparison
 WHERE is_fast_moving = 1
 GROUP BY warehouse_id
 ORDER BY gap_pct DESC;
+
+-- ---------------------------------------------------------------------------
+-- Q3. Annualized carrying-cost impact of the gap above -- Q2 states the gap
+--     in book value (a balance-sheet number); this converts it to an annual
+--     P&L number using annual_carrying_cost_pct (cost of capital + warehousing
+--     + obsolescence risk, editable in the Admin panel), which is the number
+--     that actually gets a working-capital change funded. Over-buffered
+--     warehouses carry an annual cost that reallocation would save;
+--     the under-buffered warehouse would add a (much smaller) carrying cost
+--     if brought up to the correct level.
+-- ---------------------------------------------------------------------------
+WITH demand_stats AS (
+    SELECT store_id, sku_id, AVG(demand) AS mean_demand,
+        AVG(demand * demand) - AVG(demand) * AVG(demand) AS var_demand
+    FROM fact_inventory_daily GROUP BY store_id, sku_id
+),
+leadtime_stats AS (
+    SELECT warehouse_id, AVG(actual_lead_time_days) AS mean_leadtime,
+        AVG(actual_lead_time_days * actual_lead_time_days)
+            - AVG(actual_lead_time_days) * AVG(actual_lead_time_days) AS var_leadtime
+    FROM fact_replenishment GROUP BY warehouse_id
+),
+comparison2 AS (
+    SELECT s.warehouse_id, k.unit_cost,
+        ds.mean_demand * lt.mean_leadtime +
+            (CASE WHEN k.is_fast_moving = 1 THEN 1.96 ELSE 1.28 END) *
+            sqrt(lt.mean_leadtime * ds.var_demand + ds.mean_demand * ds.mean_demand * lt.var_leadtime)
+            AS correct_reorder_point,
+        ds.mean_demand * (w.base_lead_time_days + 2) AS current_reorder_point
+    FROM demand_stats ds
+    JOIN dim_skus k ON k.sku_id = ds.sku_id
+    JOIN dim_stores s ON s.store_id = ds.store_id
+    JOIN dim_warehouses w ON w.warehouse_id = s.warehouse_id
+    JOIN leadtime_stats lt ON lt.warehouse_id = s.warehouse_id
+    WHERE k.is_fast_moving = 1
+),
+gap AS (
+    SELECT warehouse_id, SUM((correct_reorder_point - current_reorder_point) * unit_cost) AS gap_value_inr
+    FROM comparison2 GROUP BY warehouse_id
+),
+ba AS (SELECT annual_carrying_cost_pct FROM business_assumptions WHERE id = 1)
+SELECT
+    g.warehouse_id,
+    ROUND(g.gap_value_inr, 0) AS gap_value_inr,
+    CASE WHEN g.gap_value_inr < 0 THEN 'Over-buffered (carrying-cost saving if fixed)'
+         ELSE 'Under-buffered (carrying-cost added if fixed)' END AS direction,
+    ROUND(ABS(g.gap_value_inr) * ba.annual_carrying_cost_pct / 100.0, 0) AS annual_carrying_cost_impact_inr
+FROM gap g, ba
+ORDER BY g.gap_value_inr ASC;

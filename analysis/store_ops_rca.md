@@ -152,3 +152,40 @@ schema has no fact table to price directly, so it should be argued qualitatively
 a fabricated ₹ figure. A recommendation that names its own limits — and corrects them when a
 deeper look finds more — is more credible in a real ops review than one that quietly assumes a
 clean payback it can't actually show.
+
+## 7. The SLA/customer-value argument from Section 6, quantified: order failures
+
+Section 6 says the remaining ~₹319,131 has to rest on SLA and customer-retention value "this
+schema can't price directly." That was true before this round — this section closes part of that
+gap. Until now, nothing in this project tracked cancellations, returns, or refunds at all.
+**Queries used:** [`sql/12_order_failures.sql`](../sql/12_order_failures.sql)
+
+Modeled causally rather than as an unrelated random layer: cancellations are elevated under severe
+peak-hour understaffing (an order that can't realistically be fulfilled sometimes gets cancelled
+rather than delivered extremely late); returns are elevated by SLA breach (late delivery) and rain
+(transit damage) — both drivers already established elsewhere in this case study.
+
+| Condition | Orders | Cancellation rate |
+|---|---|---|
+| Severe understaffing + peak | 3,490 | **8.22%** |
+| All other conditions | 71,914 | 1.52% |
+
+| Store | Total orders | Cancelled | Returned | Failure rate | Cancelled value | Refund value |
+|---|---|---|---|---|---|---|
+| DEL-E-01 | 5,891 | 206 | 249 | **7.72%** | ₹92,778 | ₹111,448 |
+| BLR-S-02 | 5,977 | 189 | 215 | **6.76%** | ₹88,909 | ₹103,308 |
+| DEL-E-02 | 3,925 | 82 | 168 | **6.37%** | ₹38,294 | ₹80,044 |
+| Next-highest (BLR-W-01) | 5,944 | 102 | 192 | 4.95% | ₹42,817 | ₹81,650 |
+
+**The same 3 chronic-understaffed stores are, again, the top 3 by order-failure rate** — clearly
+separated from the rest of the network (4.95% next-highest vs. 6.37%+ for the three). Network-wide:
+**₹618,980 in cancelled order value plus ₹1,006,360 in refunds — ~₹1,625,340 over 60 days.**
+
+**This doesn't create a new recommendation** — the fix is the same evening-staffing fix already
+priced in Section 6. What it does is convert part of the "SLA and customer-retention value" the
+staffing-fix ROI case rests on from a qualitative argument into a partial ₹ figure: fixing the
+staffing gap would be expected to reduce order failures at these 3 stores toward the network's
+~4% baseline, recovering a meaningful share of the ~₹1.6L/60d currently lost to cancellations and
+refunds — on top of, not instead of, the SLA/retention value that still can't be priced directly
+(repeat-order impact, brand trust). It doesn't fully close the ₹319,131 gap, but it's no longer a
+purely qualitative argument either.

@@ -65,15 +65,16 @@ you connect the domains instead of reviewing them in separate meetings.
   simulation, seeded so results are reproducible. Root causes are structural (warehouse mapping,
   shift staffing levels, zone distance) — not hand-coded onto rows — so they had to be *found*,
   not verified. See [`data/generate_data.py`](../data/generate_data.py).
-- **Analysis**: SQLite + SQL — CTEs, window functions, and bucketed RCA queries across ten files
-  in [`sql/`](../sql/): one per domain, the cross-domain composite, four new metrics, and follow-on
-  findings (safety stock, cost-of-fix ROI, case-fill rate, fleet cost efficiency).
+- **Analysis**: SQLite + SQL — CTEs, window functions, and bucketed RCA queries across thirteen
+  files in [`sql/`](../sql/): one per domain, the cross-domain composite, four new metrics, and
+  follow-on findings (safety stock, cost-of-fix ROI, case-fill rate, fleet cost efficiency,
+  contribution margin, order failures, ABC/XYZ segmentation).
 - **Dashboard**: Streamlit + Plotly, seven tabs (Overview, Supply Chain, Store Ops, Last Mile,
   Cross-Domain RCA, New Metrics, Admin) with the same findings as the write-ups, interactively
   explorable. See [`dashboard/app.py`](../dashboard/app.py) — run with
   `streamlit run dashboard/app.py`.
 
-## Beyond the demo: an ingestion layer and four new metrics
+## Beyond the demo: an ingestion layer, new metrics, and three rounds of review
 
 The original version was a fixed, read-only snapshot — realistic data, but nowhere to put new
 data in. Two additions turn it into an actual tool rather than a one-time report:
@@ -129,6 +130,39 @@ data in. Two additions turn it into an actual tool rather than a one-time report
   [`sql/10_fleet_cost_efficiency.sql`](../sql/10_fleet_cost_efficiency.sql)). Catching that a
   previous version of your own analysis was incomplete, and correcting it in the open rather than
   quietly, is itself the finding worth telling in an interview.
+- **A third supply-chain review found the single biggest gap of all: `order_value` — revenue on
+  every order — had never once been used in any analysis.** Grepping all SQL files and the
+  dashboard turned up exactly one reference, in an admin-upload column list. Cost-to-Serve
+  (labor cost) had sat in the same `fact_orders` table as `order_value` (revenue) since this
+  project's first version; nothing had ever joined them. Fixing this properly took two steps, not
+  one: first, `order_value` was rebuilt to derive from real `dim_skus` economics (`unit_cost` +
+  margin) instead of an arbitrary flat range — done in a way that preserves the exact RNG draw
+  sequence, so no other order's pick/dispatch/travel-time fields shifted (see the
+  `BASKET_PRICE_FACTOR` comment in [`data/generate_data.py`](../data/generate_data.py) for the
+  realism recalibration this required, the same discipline applied earlier to the shrinkage rate).
+  Second, a genuine contribution-margin view was built on top of it (New Metrics tab; SQL:
+  [`sql/11_contribution_margin.sql`](../sql/11_contribution_margin.sql)): net revenue, implied
+  COGS, Cost-to-Serve, and net contribution per order, by store. Every store is profitable, but
+  **DEL-E-01 and DEL-E-02 — the same two highest cross-domain risk stores — post the lowest net
+  contribution per order in the network** (₹41 and ₹42 vs. the healthiest store's ₹57), closing
+  the loop that every other finding in this project had left open: the problem isn't just service
+  metrics, it's a measurable margin gap at the same two stores.
+- **Two more findings surfaced by the same review**, both previously complete blind spots: (1) this
+  project had never once tracked order cancellations, returns, or refunds — added a causally-modeled
+  order-failure lifecycle (cancellations tied to severe understaffing, returns tied to SLA breach
+  and rain) showing **~₹16.25L/60d** in cancelled/refunded value, concentrated in the same 3
+  chronic-understaffed stores (Section 7 of
+  [`analysis/store_ops_rca.md`](../analysis/store_ops_rca.md), SQL:
+  [`sql/12_order_failures.sql`](../sql/12_order_failures.sql)) — converting part of the
+  "SLA/customer-value" argument in the staffing-fix ROI case from a qualitative claim into a
+  partial ₹ figure; (2) the safety-stock Z-factor was audited against a real value×variability
+  ABC/XYZ matrix rather than the binary flag it had been using, finding an 11-SKU, modest but real
+  mismatch (Section 10 of
+  [`analysis/supply_chain_rca.md`](../analysis/supply_chain_rca.md), SQL:
+  [`sql/13_abc_xyz_segmentation.sql`](../sql/13_abc_xyz_segmentation.sql)) — and the safety-stock
+  reallocation itself was reframed from a book-value number into an annualized carrying-cost
+  impact (**~₹4.21L/year net saving**), because that's the number that actually gets a
+  working-capital change funded, not the balance-sheet figure.
 
 ## Using this for your application
 
@@ -157,6 +191,11 @@ data in. Two additions turn it into an actual tool rather than a one-time report
     halved its reported ROI coverage. Also surfaced a second warehouse reliability failure
     (case-fill rate, not just lead time) and a ₹2.26L/60d fleet cost-efficiency finding from an
     existing but previously unused data field."*
+  - *"Found that a dataset's revenue field had never been joined to its cost field across 20+
+    analytical queries; rebuilt it to derive from real product economics and shipped a
+    contribution-margin view that reframed the case study's headline operational findings as a
+    measurable per-order profitability gap — the same two highest-risk stores turned out to be the
+    two least profitable, closing the loop between service metrics and margin."*
 - **In an interview**, walk the funnel: network KPI → segmentation → isolation → root cause →
   quantified recommendation. That's the structure every finding in this project follows, and it's
   the structure the JD is explicitly asking for ("Analyze data, perform RCA, and identify

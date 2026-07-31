@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS dim_skus (
     is_fast_moving               INTEGER NOT NULL CHECK (is_fast_moving IN (0,1)),
     shelf_life_days              INTEGER NOT NULL,
     unit_cost                    REAL NOT NULL,
+    selling_price_inr            REAL NOT NULL,
     avg_daily_demand_per_store   REAL NOT NULL
 );
 
@@ -106,7 +107,11 @@ CREATE TABLE IF NOT EXISTS fact_orders (
     travel_time_min           REAL NOT NULL,
     total_delivery_min        REAL NOT NULL,
     promised_minutes          INTEGER NOT NULL,
-    sla_breach                INTEGER NOT NULL CHECK (sla_breach IN (0,1))
+    sla_breach                INTEGER NOT NULL CHECK (sla_breach IN (0,1)),
+    is_cancelled               INTEGER NOT NULL CHECK (is_cancelled IN (0,1)),
+    is_returned                INTEGER NOT NULL CHECK (is_returned IN (0,1)),
+    return_reason               TEXT,
+    refund_amount_inr           REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_fact_inventory_daily_store_sku_date ON fact_inventory_daily (store_id, sku_id, date);
@@ -125,6 +130,7 @@ CREATE TABLE IF NOT EXISTS business_assumptions (
     ev_scooter_cost_per_km_inr      REAL NOT NULL,
     petrol_scooter_cost_per_km_inr  REAL NOT NULL,
     bicycle_cost_per_km_inr         REAL NOT NULL,
+    annual_carrying_cost_pct        REAL NOT NULL,
     updated_by                      TEXT NOT NULL,
     updated_at                       TEXT NOT NULL
 );

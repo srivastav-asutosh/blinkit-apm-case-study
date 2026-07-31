@@ -104,6 +104,15 @@ the volatile one. The fix is a reallocation, which makes it an easier sell than 
 increase would be — better service at the one warehouse that needs it, funded by trimming excess
 buffer at the two that don't.
 
+**Book value isn't the number that gets this funded — annualized carrying cost is.** ₹21.0L is a
+balance-sheet figure. Converted to an annual P&L impact using an editable carrying-cost assumption
+(20%/year, covering cost of capital + warehousing + obsolescence risk;
+[`sql/07_safety_stock_policy.sql`](../sql/07_safety_stock_policy.sql) Q3): the two over-buffered
+warehouses cost **~₹506,865/year** in carrying cost that fixing the policy would recover; bringing
+WH-DEL-SECONDARY up to its correct level adds back **~₹85,887/year** — a **net annual saving of
+~₹420,978**. That net-annual number, not the book-value gap, is what an S&OP or finance review
+would actually put in a budget request.
+
 ## 7. A third, independent finding: shrinkage from an order-cycle/shelf-life mismatch
 
 Stockouts and safety stock are both about not holding *enough*. Shrinkage is the opposite failure
@@ -185,3 +194,34 @@ immediately feasible, a warehouse-side inventory-accuracy or allocation-priority
 WH-DEL-SECONDARY specifically is a lower-cost interim lever, since ~10% average shortfall on
 effectively every order suggests a systemic allocation issue rather than isolated stockouts at the
 warehouse itself.
+
+## 10. A fifth, independent finding: the safety-stock Z-factor isn't real ABC/XYZ
+
+Section 6's safety-stock formula splits its Z-factor (1.96 vs. 1.28) purely by the `is_fast_moving`
+flag, with a comment calling this "same as real ABC/XYZ inventory segmentation." It isn't one —
+real ABC/XYZ crosses **value** (A/B/C, by revenue contribution) with **variability** (X/Y/Z, by
+demand coefficient of variation) as two independent dimensions, not a single binary flag standing
+in for both. **Queries used:**
+[`sql/13_abc_xyz_segmentation.sql`](../sql/13_abc_xyz_segmentation.sql)
+
+Building the real 3×3 matrix and checking where the binary policy disagrees with it:
+
+| Classification | SKUs | Revenue (60d) |
+|---|---|---|
+| Under-protected: mid/high-value, high-variability slow-mover | 2 | ₹37.77L |
+| Over-protected: low-value fast-mover | 9 | ₹67.48L |
+| Correctly classified | 85 | ₹25.16Cr |
+
+Two SKUs sit in the mid/high-value, high-variability quadrant but are flagged `is_fast_moving = 0`
+— they're getting the lower (1.28) Z-factor when their true demand volatility calls for the higher
+(1.96) one. Nine SKUs are flagged `is_fast_moving = 1` and getting the higher Z-factor despite
+sitting in the lowest-value tercile, where that level of protection isn't justified by their
+revenue contribution.
+
+**This is a real but modest refinement, not a second version of the Section 6 finding.** The vast
+majority of the catalog (85 of 96 SKUs, ~97% of revenue) is already correctly classified by the
+binary flag — is_fast_moving happens to correlate well with true ABC/XYZ class for most of this
+catalog, because fast-moving SKUs are disproportionately the high-revenue ones. The mismatch is
+real and worth fixing (11 SKUs, ~₹1.05Cr combined revenue affected), but it's the smallest-impact
+finding in this document — the shape of a genuine analytical refinement, not a repeat of the
+warehouse-level safety-stock story.
